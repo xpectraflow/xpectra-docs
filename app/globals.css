@@ -1,20 +1,28 @@
 /**
- * Documentation theme.
+ * Documentation theme — light and dark.
  *
- * These values are lifted from xpectra-web/app/globals.css so a reader moving
+ * The dark palette is lifted from xpectra-web/app/globals.css so a reader moving
  * between docs.xpectraflow.com and the console does not cross a visual seam:
  *
  *   background #09090b   card #111113    border #27272a
  *   foreground #f4f4f5   muted  #9ca3af  primary #f97316
  *   sidebar    #050507
  *
- * They are duplicated rather than imported — the two apps are separate repos
- * with no shared package, which was a deliberate choice to avoid versioning a
- * third artifact. The cost is that a palette change has to be made twice. If
- * that becomes a real problem, a small @xpectraflow/theme package is the fix,
- * not a build-time copy of another repo's CSS.
+ * Light mode does NOT come from the console, because the console has no light
+ * theme to copy. It uses Fumadocs' own neutral preset — which is designed and
+ * contrast-checked — with only the brand accent overridden. Inventing a full
+ * light palette by eye would have produced something worse than the one that
+ * ships with the preset.
  *
- * Dark only. The console hardcodes `className="dark"` and ships no light theme.
+ * The important structural rule: overrides go under `:root` (light) and `.dark`
+ * separately. An earlier version wrote `:root, .dark { …dark values… }`, which
+ * pinned the dark palette to *both* selectors — the theme toggle then flipped
+ * next-themes' class with no visible effect, because both branches resolved to
+ * the same colours. If light mode ever stops working, check this first.
+ *
+ * These values are duplicated from the console rather than imported: the two
+ * apps are separate repos with no shared package. If the palette starts drifting
+ * in practice, a small @xpectraflow/theme package is the fix.
  */
 @import "tailwindcss";
 @import "fumadocs-ui/css/neutral.css";
@@ -27,7 +35,17 @@
   --font-mono: "Consolas", "Courier New", monospace;
 }
 
-:root,
+/* ── Light ────────────────────────────────────────────────────────────────
+   Everything else is inherited from the neutral preset. Only the accent is
+   ours, so links, the active nav item and focus rings stay XpectraFlow orange
+   in both themes. */
+:root {
+  --color-fd-primary: #ea6a0c; /* a shade deeper than the dark-mode orange, which is too light on white */
+  --color-fd-primary-foreground: #fff7ed;
+  --color-fd-ring: #ea6a0c;
+}
+
+/* ── Dark ─────────────────────────────────────────────────────────────── */
 .dark {
   --color-fd-background: #09090b;
   --color-fd-foreground: #f4f4f5;
@@ -55,16 +73,30 @@
 }
 
 /* The sidebar sits a shade darker than the page, matching the console's own
-   --sidebar-background so the two products read as one. */
-#nd-sidebar,
-aside[data-sidebar] {
+   --sidebar-background. Dark only — in light mode the preset already gives the
+   sidebar its own tint, and forcing a near-black panel there would be wrong. */
+.dark #nd-sidebar,
+.dark aside[data-sidebar] {
   --color-fd-card: #050507;
   background-color: #050507;
 }
 
 /* Inline code inside prose. The preset's default sits too close to the page
    background at this palette's contrast to register as a distinct token. */
-.prose :not(pre) > code {
+.dark .prose :not(pre) > code {
   background-color: #1e1e22;
   border: 1px solid #27272a;
+}
+
+/* ── Sidebar footer ───────────────────────────────────────────────────────
+   The theme switch lives in a bordered row that Fumadocs also uses for icon
+   links and the language selector. With none of those configured the row has
+   nothing on its left, and the switch — which carries `ms-auto` — is pushed to
+   the far right, leaving a wide empty rectangle that reads as a broken text
+   input. Shrinking the row to its content turns it back into what it is: a
+   compact segmented control. */
+#nd-sidebar div:has(> [data-theme-toggle]) {
+  width: fit-content;
+  margin-inline-start: auto;
+  padding-inline-end: calc(var(--spacing) * 0.5);
 }

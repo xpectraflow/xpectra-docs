@@ -35,15 +35,26 @@ export const metadata: Metadata = {
  * Root layout. Owns <html> and <body>, which the console's own root layout used
  * to supply when the docs were mounted inside it.
  *
- * `theme={{ enabled: false }}` keeps the site dark-only. The console hardcodes
- * `className="dark"` and has no light theme, so a toggle here would offer a
- * pairing that exists nowhere else in the product.
+ * Both themes are live, and three things have to agree for the toggle to work:
+ *
+ *   1. no hardcoded `dark` class on <html> — next-themes owns that class, and a
+ *      static one silently wins over whatever the user picks;
+ *   2. `RootProvider` left at its defaults so the provider is actually mounted;
+ *   3. light and dark tokens defined under *separate* selectors in globals.css.
+ *
+ * Miss any one and the switch appears to do nothing. `defaultTheme: "dark"` so
+ * a first-time reader lands on the palette that matches the console, while
+ * still being free to change it.
+ *
+ * `suppressHydrationWarning` is required: next-themes sets the class on the
+ * client before React hydrates, so the server and client markup differ by
+ * design on this one element.
  */
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={`dark ${inter.variable}`} suppressHydrationWarning>
+    <html lang="en" className={inter.variable} suppressHydrationWarning>
       <body className="antialiased">
-        <RootProvider theme={{ enabled: false }}>
+        <RootProvider theme={{ defaultTheme: "dark" }}>
           <DocsLayout
             tree={source.pageTree}
             nav={{
