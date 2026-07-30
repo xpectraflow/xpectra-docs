@@ -1,0 +1,198 @@
+---
+title: Authentication
+description: Exchange a client id and secret for a short-lived token, and use the same token on HTTP and gRPC.
+---
+
+XpectraFlow uses the OAuth2 **client credentials** grant. You hold a long-lived
+`client_id` and `client_secret`; you exchange them for an access token that
+expires in an hour; the token is what travels on every request.
+
+The token is signed, not looked up. That is what lets the same token authenticate
+an HTTP call and a gRPC stream, and why services can verify it without asking us.
+
+## 1. Create a client
+
+Clients are created out-of-band — a credential system has to start somewhere, and
+that somewhere is always a human running something.
+
+```bash
+npx tsx scripts/create-oauth-client.ts <org-slug> "Flight Ops" telemetry:write events:write
+```
+
+It prints the pair once:
+
+```
+  client_id      xpc_80b093c79de421bd9a25a8cb657f0077
+  client_secret  e014ae3cfc91f6a54ec41545f580d45a…
+  scopes         telemetry:write events:write
+```
+
+<Callout type="warn">
+The secret is stored only as a SHA-256 digest. It is shown once and cannot be
+recovered — losing it means creating a new client.
+</Callout>
+
+Omit the scopes to get everything except credential management.
+
+## 2. Get a token
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/v1/auth/token \
+  -d grant_type=client_credentials \
+  -d client_id=xpc_80b093c79de421bd9a25a8cb657f0077 \
+  -d client_secret=e014ae3cfc91f6a54ec41545f580d45a
+```
+
+```json
+{
+  "access_token": "eyJhbGciOiJFZERTQSIsImtpZCI6…",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "telemetry:write telemetry:read events:write events:read"
+}
+```
+
+Form-encoded, per RFC 6749 — so any OAuth2 client library already speaks it. HTTP
+Basic works too, if your library prefers that:
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/v1/auth/token \
+  -u "$CLIENT_ID:$CLIENT_SECRET" \
+  -d grant_type=client_credentials
+```
+
+Note the returned `scope` is wider than what was asked for. `:write` implies
+`:read` on the same resource — a writer that cannot read back what it wrote is a
+support ticket, not a security boundary.
+
+### Asking for less
+
+A client's scopes are a **ceiling**, not a grant. Request a subset for a
+particular token:
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/v1/auth/token \
+  -d grant_type=client_credentials \
+  -d client_id=$CLIENT_ID -d client_secret=$CLIENT_SECRET \
+  -d 'scope=telemetry:write'
+```
+
+Asking for more than the ceiling is an error, not a silent downgrade:
+
+```json
+{
+  "error": {
+    "code": "invalid_scope",
+    "message": "This client is not permitted the scope: clients:write.",
+    "details": [],
+    "request_id": "31592257-1558-48ed-8328-a5086ccfa4ed"
+  }
+}
+```
+
+A caller that believes it holds `telemetry:write` and quietly does not will fail
+later, somewhere less obvious than here.
+
+## 3. Use it
+
+```bash
+curl -s https://app.xpectraflow.com/api/v1/experiments \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+The same header works as gRPC metadata:
+
+```python
+metadata = [("authorization", f"Bearer {access_token}")]
+stub.Submit(request, metadata=metadata)
+```
+
+## Scopes
+
+`<resource>:<action>`. No wildcards.
+
+| Scope | Grants |
+|---|---|
+| `experiments:read` | List and read experiments |
+| `experiments:write` | Create, update and delete experiments |
+| `datasets:read` | List datasets and their channels |
+| `datasets:write` | Create, update and delete datasets; register streams |
+| `telemetry:read` | Query telemetry and signals |
+| `telemetry:write` | Ingest telemetry points and frames |
+| `events:read` | Read dataset events |
+| `events:write` | Append dataset events |
+| `commands:read` | Read the command log |
+| `commands:write` | Log commands and acknowledge delivered ones |
+| `webhooks:read` | List webhook endpoints and their deliveries |
+| `webhooks:write` | Register, update and remove webhook endpoints |
+| `clients:read` | List OAuth clients |
+| `clients:write` | Create and revoke OAuth clients |
+
+Grant the narrowest set that works. A telemetry producer wants
+`telemetry:write`, not everything.
+
+## Verifying tokens yourself
+
+The public keys are published, so anything in your own infrastructure can verify
+a token without calling us:
+
+```bash
+curl -s https://app.xpectraflow.com/.well-known/jwks.json
+```
+
+```json
+{
+  "keys": [
+    {
+      "crv": "Ed25519",
+      "x": "F84b5fGOdcDZBdVZ-gI5U67LtZEzWEkcOuZzPqlPGNA",
+      "kty": "OKP",
+      "kid": "hgNYQZCVkXcGGlr-",
+      "use": "sig",
+      "alg": "EdDSA"
+    }
+  ]
+}
+```
+
+Tokens are **EdDSA (Ed25519)** only. Reject any other `alg` — a verifier that
+trusts the header's algorithm can be handed a token re-signed with the public key
+as an HMAC secret, and that key is right there in the document above.
+
+Claims:
+
+| Claim | Meaning |
+|---|---|
+| `iss` | `https://app.xpectraflow.com` |
+| `aud` | `xpectra-api` |
+| `sub` | the `client_id` |
+| `org` | organization the token acts for |
+| `scope` | space-delimited scopes |
+| `exp` / `iat` | expiry and issue time |
+| `jti` | unique token id |
+
+## Rotation and revocation
+
+Keys rotate without breaking tokens in flight: during a rotation the JWKS carries
+both the new and previous public key, so tokens signed before the change keep
+verifying until they expire. If you cache the key set, refetch when you meet a
+`kid` you do not recognise.
+
+<Callout type="warn">
+**Revocation is eventual.** Revoking a client stops it minting new tokens
+immediately, but tokens already issued stay valid until they expire — up to one
+hour. That is the cost of tokens that can be verified without a database lookup.
+Treat a leaked token as live for an hour.
+</Callout>
+
+## API keys (deprecated)
+
+Older integrations use a static `sk_xp_` key:
+
+```bash
+curl -s https://app.xpectraflow.com/api/v1/experiments -H "x-api-key: sk_xp_…"
+```
+
+Still works, and will keep working. But it never expires, cannot be scoped
+narrowly in practice, and a leak is permanent until somebody notices. New
+integrations should use client credentials.

@@ -1,0 +1,70 @@
+/**
+ * Documentation theme.
+ *
+ * These values are lifted from xpectra-web/app/globals.css so a reader moving
+ * between docs.xpectraflow.com and the console does not cross a visual seam:
+ *
+ *   background #09090b   card #111113    border #27272a
+ *   foreground #f4f4f5   muted  #9ca3af  primary #f97316
+ *   sidebar    #050507
+ *
+ * They are duplicated rather than imported — the two apps are separate repos
+ * with no shared package, which was a deliberate choice to avoid versioning a
+ * third artifact. The cost is that a palette change has to be made twice. If
+ * that becomes a real problem, a small @xpectraflow/theme package is the fix,
+ * not a build-time copy of another repo's CSS.
+ *
+ * Dark only. The console hardcodes `className="dark"` and ships no light theme.
+ */
+@import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
+
+@source "../node_modules/fumadocs-ui/dist/**/*.js";
+
+@theme {
+  --font-sans: var(--font-inter), "Segoe UI", Arial, Helvetica, sans-serif;
+  --font-mono: "Consolas", "Courier New", monospace;
+}
+
+:root,
+.dark {
+  --color-fd-background: #09090b;
+  --color-fd-foreground: #f4f4f5;
+
+  --color-fd-card: #111113;
+  --color-fd-card-foreground: #f4f4f5;
+
+  --color-fd-popover: #111113;
+  --color-fd-popover-foreground: #f4f4f5;
+
+  --color-fd-primary: #f97316;
+  --color-fd-primary-foreground: #fff7ed;
+
+  --color-fd-secondary: #1e1e22;
+  --color-fd-secondary-foreground: #f4f4f5;
+
+  --color-fd-muted: #16161a;
+  --color-fd-muted-foreground: #9ca3af;
+
+  --color-fd-accent: #1f2937;
+  --color-fd-accent-foreground: #f4f4f5;
+
+  --color-fd-border: #27272a;
+  --color-fd-ring: #f97316;
+}
+
+/* The sidebar sits a shade darker than the page, matching the console's own
+   --sidebar-background so the two products read as one. */
+#nd-sidebar,
+aside[data-sidebar] {
+  --color-fd-card: #050507;
+  background-color: #050507;
+}
+
+/* Inline code inside prose. The preset's default sits too close to the page
+   background at this palette's contrast to register as a distinct token. */
+.prose :not(pre) > code {
+  background-color: #1e1e22;
+  border: 1px solid #27272a;
+}

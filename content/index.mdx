@@ -1,0 +1,35 @@
+---
+title: XpectraFlow API
+description: Ingest, query and annotate engineering telemetry over HTTP, gRPC and NATS.
+---
+
+XpectraFlow stores high-rate engineering telemetry — drone flights, propulsion
+tests, spacecraft downlink — and gives you charts, events and a command log over
+the top of it. This is the reference for talking to it from your own systems.
+
+## Start here
+
+<Cards>
+  <Card title="Core concepts" href="/concepts" description="Organizations, experiments, datasets, channels — what the nouns mean before you touch an endpoint." />
+  <Card title="Authentication" href="/authentication" description="Create a client, exchange it for a token, and use the same token on HTTP and gRPC." />
+</Cards>
+
+## How data gets in
+
+There are three ingestion paths, and which one you want depends almost entirely
+on rate.
+
+| Path | Good for | Roughly |
+|---|---|---|
+| HTTP batch | scripts, backfills, anything human-triggered | up to a few hundred points/s |
+| gRPC streaming | sustained sensor feeds | 10 kHz, validated to 20 kHz |
+| NATS JetStream | first-party high-rate producers | internal network only |
+
+If you are not sure, start with HTTP. It is the only one you can drive with
+`curl`, and moving to gRPC later does not change the data model.
+
+## Conventions
+
+Every endpoint under `/api/v1` follows the same rules — one bearer header, one
+error shape, cursor pagination, RFC 3339 timestamps in UTC. They are written
+down in [API conventions](/conventions) so you only have to read them once.

@@ -1,0 +1,126 @@
+---
+title: API conventions
+description: The rules every /api/v1 endpoint follows, so the endpoint pages can be short.
+---
+
+Read this once and the reference pages get much shorter. Every endpoint under
+`/api/v1` obeys all of it.
+
+<Callout type="warn">
+**Rollout in progress.** The only endpoints live today are
+`POST /api/v1/auth/token` and `/.well-known/jwks.json`. Authentication, errors,
+request ids and types below are all in force on those. The verb and deprecation
+sections describe the contract the resource endpoints will land under — they are
+the rules we are building to, not a description of something you can call yet.
+This page will lose the notice when the resource endpoints ship.
+</Callout>
+
+## Base URL and version
+
+```
+https://app.xpectraflow.com/api/v1
+```
+
+The version is in the path and will change only for a breaking change. There are
+no unversioned public endpoints — anything you find outside `/api/v1` is either
+internal or deprecated.
+
+## Authentication
+
+One header, everywhere, including gRPC metadata:
+
+```
+Authorization: Bearer <access_token>
+```
+
+`x-api-key: sk_xp_…` remains accepted for existing integrations. See
+[Authentication](/authentication).
+
+## Errors
+
+Every failure has the same shape:
+
+```json
+{
+  "error": {
+    "code": "insufficient_scope",
+    "message": "This credential lacks the datasets:write scope.",
+    "details": [],
+    "request_id": "31592257-1558-48ed-8328-a5086ccfa4ed"
+  }
+}
+```
+
+Branch on `code`. It is stable for a given condition. `message` is prose for a
+human reading logs and may be reworded.
+
+| Status | `code` | Means |
+|---|---|---|
+| 400 | `invalid_request` | Malformed body or parameters; see `details` |
+| 400 | `invalid_scope` | Asked for a scope the client is not permitted |
+| 400 | `unsupported_grant_type` | Only `client_credentials` is supported |
+| 401 | `unauthorized` | Missing, malformed, unknown or expired credential |
+| 401 | `invalid_client` | Client authentication failed at the token endpoint |
+| 403 | `insufficient_scope` | Authenticated, but the credential lacks the scope |
+| 403 | `forbidden` | Authenticated and scoped, but not allowed |
+| 404 | `not_found` | No such resource — **or** it is not yours |
+| 409 | `conflict` | Name already taken, or a state conflict |
+| 413 | `payload_too_large` | Body exceeded the limit |
+| 500 | `internal_error` | Our fault. `request_id` is what to quote |
+
+On validation failures `details` carries per-field messages:
+
+```json
+"details": [{ "field": "channels.0.name", "message": "String must contain at least 1 character(s)" }]
+```
+
+<Callout type="info">
+`404` deliberately conflates "does not exist" with "exists but belongs to another
+organization". Distinguishing them would confirm that an id is real, which is the
+one thing worth withholding from someone guessing ids.
+</Callout>
+
+## Request ids
+
+Send `X-Request-Id` and it is echoed back and used in our logs. Send nothing and
+one is generated. Either way it appears on the response and inside every error
+body — quote it when reporting a problem.
+
+```bash
+curl -s https://app.xpectraflow.com/api/v1/experiments \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Request-Id: my-job-42"
+```
+
+## Types
+
+| | |
+|---|---|
+| **Casing** | `camelCase` in JSON bodies and query parameters |
+| **Timestamps** | RFC 3339, UTC, milliseconds — `2026-07-30T12:00:00.000Z` |
+| **Ids** | UUID v4 strings |
+| **Content type** | `application/json`, except the token endpoint, which is form-encoded because RFC 6749 says so |
+
+The protobuf definitions use `snake_case` and epoch nanoseconds. That boundary is
+the gRPC and NATS wire format only; nothing in the HTTP API uses it.
+
+## Verbs
+
+| | |
+|---|---|
+| `GET` | Read. Never changes anything |
+| `POST` | Create. Returns `201` and a `Location` header |
+| `PATCH` | Partial update. Send only the fields you are changing |
+| `DELETE` | Returns `204` with no body. Idempotent |
+
+## Deprecation
+
+A deprecated endpoint keeps working and announces itself:
+
+```
+Deprecation: true
+Sunset: Wed, 31 Dec 2026 23:59:59 GMT
+```
+
+Nothing is removed without a `Sunset` date having been served for a good while
+first. If you are automating against us, log these headers.

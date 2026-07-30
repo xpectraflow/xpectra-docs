@@ -1,0 +1,126 @@
+---
+title: Core concepts
+description: Organizations, experiments, datasets and channels — the four nouns everything else hangs off.
+---
+
+Four nouns, nested. Everything in the API is one of these or attached to one.
+
+```
+Organization
+└── Experiment          a test campaign, a mission, a programme
+    └── Dataset         one run: a flight, a burn, a bench test
+        └── Channel     one measured signal: pressure, altitude, voltage
+```
+
+## Organization
+
+The tenancy boundary. Every experiment, dataset and credential belongs to exactly
+one organization, and nothing crosses between them.
+
+The console calls these **workspaces**. Same thing.
+
+People join by invite, by a 16-character join code, or automatically if their
+email domain is on the organization's allowlist. Membership has two roles:
+
+| Role | Can |
+|---|---|
+| `owner` | everything, including managing members and deleting the workspace |
+| `member` | read and write experiments, datasets and telemetry |
+
+<Callout type="info">
+Member management is **not** in the API. Adding or removing people is an identity
+operation, and a leaked credential should not be able to grant someone access.
+It stays in the console.
+</Callout>
+
+## Experiment
+
+A container for related runs — a test campaign, a mission, a vehicle programme.
+It holds a name, a description, and a status:
+
+```
+draft → active → archived
+```
+
+Nothing enforces that order; set whichever fits. Experiment names must be unique
+within an organization.
+
+## Dataset
+
+A single run. One flight, one burn, one bench test. This is where telemetry
+actually lands.
+
+```
+queued → running → completed
+                 → failed
+```
+
+A dataset is created either by the console, by an API call, or by a producer
+registering a live stream. Creating one returns an **ingest token exactly once**
+— it is stored only as a bcrypt hash, so if you lose it you create a new dataset
+rather than recovering the old token.
+
+Each dataset gets its own TimescaleDB hypertable named `hyper-<dataset-id>`.
+
+### Wide and narrow
+
+Datasets come in two physical shapes, and the choice is not cosmetic.
+
+**Wide** is a column per channel — one row per sampling instant, every channel
+filled in. Right for a DAQ that samples everything on the same clock.
+
+**Narrow** is one row per measurement. Right for a source whose signals arrive at
+unrelated rates with no synchronised frame — a MAVLink vehicle sends `ATTITUDE`
+at 10 Hz and `GPS_RAW_INT` at 5 Hz and `STATUSTEXT` when something breaks.
+
+Forcing a source like that into a wide table means inventing values for every
+cell that did not arrive, which is why the distinction exists at all.
+
+## Channel
+
+One measured signal, with a name and a unit.
+
+Internally channels map to columns `ch_0`, `ch_1`, … in declared order. You will
+see those indices in the gRPC and NATS paths, and in the `channelIndices` a
+stream registration hands back.
+
+<Callout type="warn">
+The gRPC ingest path addresses channels by **index**, as a string — `"0"`, not
+the channel's UUID and not its name. Points whose `channel_id` matches nothing
+are dropped silently, with no error and no counter. If a gRPC ingest appears to
+succeed but no data shows up, this is almost always why.
+</Callout>
+
+## Events
+
+Timestamped annotations on a dataset's timeline — a mode change, a failsafe, a
+line in the log. They are append-only and carry a client-supplied id so a
+producer can retry without creating duplicates.
+
+One event type earns a special mention. `LINK_LOSS` means *we do not know what
+happened here*, which is a different claim from *nothing happened here*. Both
+look like absent rows downstream, and a chart that interpolates across the first
+is drawing an altitude nobody measured.
+
+## Commands
+
+A log of telecommands a human issued, with arguments, timestamp and author.
+
+<Callout type="warn">
+**XpectraFlow transmits nothing.** The command log records that an operator
+issued a command; it does not put bytes on a radio. The MAVLink agent binds a
+socket it never writes to, and there is a test asserting that it never
+transmits.
+
+This is deliberate. A system that can command a vehicle inherits a regulatory
+surface, and observability is a different product from control.
+</Callout>
+
+Commands move forward only — `logged`, then `retracted` if withdrawn. Rows are
+never edited and never deleted, because the point of the log is what was true at
+the time.
+
+## What next
+
+Get a credential in [Authentication](/authentication), then read
+[API conventions](/conventions) once so the endpoint pages are short.
