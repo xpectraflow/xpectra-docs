@@ -88,6 +88,33 @@
   border: 1px solid #27272a;
 }
 
+/* ── Layout width ─────────────────────────────────────────────────────────
+   Fumadocs lays the page out as a five-column grid:
+
+     minmax(min-content,1fr)  sidebar  main  toc  minmax(min-content,1fr)
+
+   with areas "sidebar sidebar main toc toc" — so the sidebar panel spans the
+   left gutter and the table of contents spans the right one. `main` is sized
+   as `--fd-layout-width` minus the sidebar and toc, and whatever the viewport
+   has left over is split between the two 1fr gutters.
+
+   At the default 1400px on a ~2000px display that is 600px of slack: a 300px
+   strip of sidebar-coloured background with nothing in it on the left, and the
+   same again to the right of the toc. Both look like rendering faults.
+
+   Setting the layout width to 100% gives the slack to `main` instead, so the
+   gutters collapse to zero, the sidebar is exactly its 268px, and the toc sits
+   against the right edge. Prose keeps its own max-width, so lines do not get
+   longer — only the gutters disappear.
+
+   `100%` rather than `100vw` on purpose: `vw` includes the scrollbar, which
+   would make the columns total slightly more than the available width and
+   introduce a horizontal scrollbar. A percentage resolves against the grid
+   container. */
+:root {
+  --fd-layout-width: 100%;
+}
+
 /* ── Sidebar footer ───────────────────────────────────────────────────────
    The theme switch lives in a bordered row that Fumadocs also uses for icon
    links and the language selector. With none of those configured the row has
