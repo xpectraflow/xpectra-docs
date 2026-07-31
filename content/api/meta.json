@@ -1,0 +1,13 @@
+{
+  "title": "API reference",
+  "description": "One page per resource, every operation on it.",
+  "pages": [
+    "api-keys",
+    "experiments",
+    "datasets",
+    "channels",
+    "events",
+    "commands",
+    "webhooks"
+  ]
+}

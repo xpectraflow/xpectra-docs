@@ -10,26 +10,50 @@ the top of it. This is the reference for talking to it from your own systems.
 ## Start here
 
 <Cards>
+  <Card title="Quickstart" href="/quickstart" description="Key, experiment, dataset, data, back out again — about ten minutes, entirely with curl." />
   <Card title="Core concepts" href="/concepts" description="Organizations, experiments, datasets, channels — what the nouns mean before you touch an endpoint." />
-  <Card title="Authentication" href="/authentication" description="Create a client, exchange it for a token, and use the same token on HTTP and gRPC." />
+  <Card title="Authentication" href="/authentication" description="Create an API key in the console and send it as x-api-key, on HTTP and gRPC alike." />
+  <Card title="API conventions" href="/conventions" description="One error shape, one request id, no deletes. Read once, and the reference gets shorter." />
 </Cards>
 
 ## How data gets in
 
-There are three ingestion paths, and which one you want depends almost entirely
-on rate.
+Three paths, and which one you want depends almost entirely on rate.
 
 | Path | Good for | Roughly |
 |---|---|---|
-| HTTP batch | scripts, backfills, anything human-triggered | up to a few hundred points/s |
-| gRPC streaming | sustained sensor feeds | 10 kHz, validated to 20 kHz |
-| NATS JetStream | first-party high-rate producers | internal network only |
+| [HTTP append](/ingestion/http-append) | Scripts, backfills, slow sensors | up to a few hundred points/s |
+| [gRPC streaming](/ingestion/grpc-streaming) | Sustained sensor feeds | 10 kHz, validated to 20 kHz |
+| [NATS JetStream](/ingestion/nats-jetstream) | First-party high-rate producers | internal network only |
+
+All three start the same way — [register a
+stream](/ingestion/register-a-stream) — and share one data model, so moving
+between them later changes the transport and nothing else.
 
 If you are not sure, start with HTTP. It is the only one you can drive with
-`curl`, and moving to gRPC later does not change the data model.
+`curl`.
 
-## Conventions
+## Getting commands out
 
-Every endpoint under `/api/v1` follows the same rules — one bearer header, one
-error shape, cursor pagination, RFC 3339 timestamps in UTC. They are written
-down in [API conventions](/conventions) so you only have to read them once.
+XpectraFlow **does not transmit to your vehicle.** When an operator issues a
+command, we POST a signed notification to an HTTPS endpoint you registered, and
+your own system owns the last mile — the radio, the interlocks, the
+responsibility.
+
+[How command delivery works](/commands) explains the model, the two interlocks
+that gate it, and what your receiver has to do.
+
+## The reference
+
+Organised by resource — one page per noun, with every operation on it, a
+runnable `curl`, and the response it actually returns.
+
+<Cards>
+  <Card title="Experiments" href="/api/experiments" description="The container everything hangs off." />
+  <Card title="Datasets" href="/api/datasets" description="Runs, and appending rows to one." />
+  <Card title="Channels" href="/api/channels" description="What ch_N means and why it is the only address that works." />
+  <Card title="Events" href="/api/events" description="Annotate a run, including live." />
+  <Card title="Commands" href="/api/commands" description="Dispatch, acknowledge, arm." />
+  <Card title="Webhooks" href="/api/webhooks" description="Where commands are delivered, and how they are signed." />
+  <Card title="API keys" href="/api/api-keys" description="List and revoke. Creating one is console-only." />
+</Cards>

@@ -1,0 +1,253 @@
+---
+title: Commands
+description: Dispatch a logged command, read the log, arm a dataset, and acknowledge an outcome.
+---
+
+The command endpoints. Read [how command delivery works](/commands) first — the
+model matters more than the calls, and one of these routes authenticates
+differently from everything else in this API.
+
+## Log a command
+
+<Endpoint method="POST" path="/api/commands/create" scope="commands:write" />
+
+Records a command. **Nothing is sent anywhere** — this writes an audit row with
+`status: "logged"`, and only [dispatch](#dispatch-a-command) moves it off that.
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", required: true },
+    datasetId: { type: "string", required: true },
+    commandText: { type: "string", description: "1–500 characters.", required: true },
+    relTime: { type: "number", description: "Seconds from the dataset's T=0 — the chart coordinate.", required: true },
+    clientToken: { type: "string", description: "UUID. Idempotency key.", required: true },
+    args: { type: "Record<string, string | number | boolean>", description: "Up to 24 keys.", default: "{}" },
+    description: { type: "string", description: "Up to 2000 characters." },
+    templateKey: { type: "string" },
+    category: { type: '"satellite" | "drone" | "general"', default: '"general"' },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/commands/create \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "commandText": "MAV_CMD_DO_SET_SERVO",
+    "args": { "servo": 5, "pwm": 1900 },
+    "relTime": 412.7,
+    "category": "drone",
+    "clientToken": "0d6a5b1c-2e94-4a7f-9c31-8b02d5e6f7a1"
+  }'
+```
+
+Returns the row, with `duplicate: true` when the `clientToken` had already been
+used. A retried request returns the row it already wrote rather than logging the
+command twice — a duplicate in a command log reads as an operator who pressed
+send twice.
+
+<Callout type="info">
+**Attribution stays honest.** A command logged through the API has no
+`issuedBy` user; the row records the API key instead, and `issuedByName` is
+left empty rather than filled with something plausible like "API".
+
+An audit row that names a person is a claim that a person pressed the button,
+and *"was this a human or a script"* is the first question anyone asks about a
+command after the fact. The console renders an empty issuer as the key's name;
+it cannot un-learn a fabricated one.
+</Callout>
+
+## List commands
+
+<Endpoint method="GET" path="/api/commands/list" scope="commands:read" />
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", required: true },
+    datasetId: { type: "string", required: true },
+  }}
+/>
+
+```bash
+curl -s "https://app.xpectraflow.com/api/commands/list?experimentId=$EXPERIMENT_ID&datasetId=$DATASET_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+```json
+[
+  {
+    "id": "7e1b90c4-3a55-4d21-8c9f-2b3e4a1d6f80",
+    "commandText": "MAV_CMD_DO_SET_SERVO",
+    "description": "Vent valve to 90%",
+    "args": { "servo": 5, "pwm": 1900 },
+    "templateKey": "drone.mav.do_set_servo",
+    "category": "drone",
+    "relTime": 412.7,
+    "issuedAt": "2026-07-31T11:59:58.100Z",
+    "issuedByName": "Ada Okafor",
+    "issuedByEmail": "ada@example.com",
+    "status": "acked",
+    "statusDetail": "MAV_RESULT_ACCEPTED",
+    "queuedAt": "2026-07-31T12:00:00.100Z",
+    "deliveredAt": "2026-07-31T12:00:00.412Z",
+    "ackedAt": "2026-07-31T12:00:04.980Z",
+    "ackDeadlineAt": "2026-07-31T12:05:00.000Z",
+    "vehicleTime": "2026-07-31T12:00:04.180Z",
+    "ackPayload": { "result": "MAV_RESULT_ACCEPTED" },
+    "deliveryAttempts": 1,
+    "clientToken": "0d6a5b1c-2e94-4a7f-9c31-8b02d5e6f7a1"
+  }
+]
+```
+
+Ordered by `relTime` — timeline order, not issue order. Retracted commands are
+included, unlike in the console's own list: an integrator reconciling records
+against ours needs to see that a row exists and was withdrawn, rather than find
+it silently absent.
+
+See [the state table](/commands#the-states) for what each `status` means.
+
+## Dispatch a command
+
+<Endpoint method="POST" path="/api/commands/dispatch" scope="commands:write" />
+
+<TypeTable
+  type={{
+    commandId: { type: "string", description: "From the list endpoint.", required: true },
+    ackTimeoutSeconds: {
+      type: "number",
+      description: "30 to 3600. How long your system has to report an outcome.",
+      default: "300",
+    },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/commands/dispatch \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"commandId": "7e1b90c4-…", "ackTimeoutSeconds": 300}'
+```
+
+```json
+{
+  "commandId": "7e1b90c4-…",
+  "status": "queued",
+  "ackDeadline": "2026-07-31T12:05:00.000Z",
+  "endpoints": [{ "id": "6b0d2f18-…", "url": "https://ops.example.com/xpectra-hook" }]
+}
+```
+
+Returns as soon as the command is queued. It never blocks on your endpoint —
+delivery, retries and the deadline all happen afterwards.
+
+### What has to be true
+
+In order, and each is a `409` with a message naming the problem:
+
+<Steps>
+<Step>
+**Command webhooks are enabled on the deployment.** The
+[kill switch](/commands/arming#the-kill-switch), read on every dispatch.
+</Step>
+<Step>
+**The dataset is armed**, and the arming has not expired. A refusal here leaves
+the command `logged` and untouched — nothing was attempted, and the audit row
+should say so.
+</Step>
+<Step>
+**At least one enabled webhook endpoint exists.** Otherwise the command would be
+queued for nobody.
+</Step>
+<Step>
+**The command is still `logged`.** A compare-and-set, so two racing dispatches
+cannot both win — the loser gets `409`.
+</Step>
+</Steps>
+
+Dispatching is idempotent in the way that matters: a retried HTTP request
+collapses on the message id, so a double-click cannot send two copies.
+
+## Acknowledge
+
+<Endpoint method="POST" path="/api/commands/ack" scope={null} />
+
+<Callout type="warn">
+**This is the one endpoint in the API that does not take an API key.**
+
+It authenticates with a per-command bearer token delivered inside the webhook
+payload as `ack.token`, valid for that command until its deadline.
+
+An API key would be the wrong credential here. The system doing the acking sits
+at the edge of a vehicle network — a ground station, a relay, the least
+defensible box in the topology — and an org-wide key there could inject
+fabricated commands into every dataset's audit log. The webhook signing secret
+would be worse still: it is a *receiving* credential, and a compromise would let
+an attacker forge deliveries rather than one acknowledgement.
+
+A per-command token's worst case is one false ack on one command.
+</Callout>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/commands/ack \
+  -H "Authorization: Bearer cak_7f3a…" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "commandId": "7e1b90c4-…",
+    "state": "acked",
+    "vehicleTime": "2026-07-31T12:00:04.180Z",
+    "detail": "MAV_RESULT_ACCEPTED"
+  }'
+```
+
+<TypeTable
+  type={{
+    commandId: { type: "string", required: true },
+    state: { type: '"acked" | "nacked"', required: true },
+    vehicleTime: { type: "string", description: "RFC 3339. The vehicle's own clock." },
+    detail: { type: "string", description: "Up to 2000 characters." },
+    payload: { type: "object", description: "Any extra structured detail." },
+  }}
+/>
+
+```json
+{
+  "commandId": "7e1b90c4-…",
+  "status": "acked",
+  "acknowledgedAt": "2026-07-31T12:00:04.980Z",
+  "duplicate": false
+}
+```
+
+Behaviour worth knowing:
+
+- Single-use. A second call with the same token gets `404`.
+- Repeating the **same** state you already reported returns `200` with
+  `"duplicate": true` — a retry after a network timeout is not an error.
+- A wrong, expired or spent token returns `404`, never `401`. Distinguishing
+  them would tell someone probing which half of the guess was right.
+- Rate-limited to 10 attempts per command per minute.
+
+Full worked example on [the receiver page](/commands/receiver#acknowledge).
+
+## Arming
+
+Covered in full on [Arming and the kill switch](/commands/arming):
+
+| | |
+|---|---|
+| `POST /api/datasets/arm` | `commands:write` |
+| `POST /api/datasets/disarm` | `commands:write` |
+| `GET /api/datasets/arming` | `commands:read` |
+
+## Errors
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | Missing ids, `ackTimeoutSeconds` out of range |
+| 403 | `insufficient_scope` | Key lacks `commands:read` or `commands:write` |
+| 404 | `not_found` | No such command; or, on ack, a bad or spent token |
+| 409 | `conflict` | Kill switch off, dataset not armed, no endpoint, or already dispatched |
+| 429 | `rate_limited` | Too many ack attempts for one command |

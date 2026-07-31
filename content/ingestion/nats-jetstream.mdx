@@ -1,0 +1,101 @@
+---
+title: NATS JetStream
+description: The columnar frame format the high-rate pipeline actually runs on.
+---
+
+<Callout type="warn">
+**Internal network only.** The broker is not exposed publicly and there is no
+NATS-level authentication in the reference deployment — it is reachable only
+from inside the deployment's own network.
+
+This page documents the format for first-party producers and self-hosted
+deployments. If you are integrating from outside, use
+[gRPC](/ingestion/grpc-streaming).
+</Callout>
+
+## The shape
+
+```
+producer --RegisterStream--> gateway --> { subject, token }
+producer --TelemetryFrame--> NATS  (telemetry.{datasetId})
+stream-consumer <--pull-- NATS --> CopyFrom into hyper-{datasetId}
+```
+
+Register once over the control plane, then publish frames to
+`telemetry.{datasetId}`. The consumer captures `telemetry.>`, so every dataset
+lands in one `TELEMETRY` stream.
+
+## The frame
+
+```proto
+message TelemetryFrame {
+  string dataset_id = 1;
+  uint64 seq = 2;                 // monotonic per stream; a gap means loss or reorder
+  int64  base_unix_nanos = 3;     // wall-clock ns of row 0, UTC
+  uint64 sample_period_nanos = 4; // dt between consecutive rows
+  uint32 row_count = 5;           // == each column's length
+  repeated ChannelColumn columns = 6;
+}
+
+message ChannelColumn {
+  uint32 channel_index = 1;       // maps to hypertable column ch_{channel_index}
+  oneof values {
+    DoubleArray f64 = 2;
+    FloatArray  f32 = 3;
+    Int64Array  i64 = 4;
+    BoolArray   b   = 5;
+  }
+}
+```
+
+This is why the high-rate path is not HTTP: **one timestamp and one sample
+period describe the whole frame**, and values arrive as packed arrays per
+channel. A thousand rows of eight channels is one base timestamp, not a
+thousand.
+
+`channel_index` is the `N` from `ch_N` — the same index
+[registration](/ingestion/register-a-stream) returned in `channelIndices`.
+
+A missing column in a frame writes SQL NULL for that channel, so a sensor that
+drops out does not stop the others.
+
+## Sizing
+
+Pick `row_count` so a frame is a few kilobytes to tens of kilobytes. At 10–20 kHz
+that is roughly 200–1000 rows, giving 10–100 frames per second per stream.
+
+Measured baseline: 20 kHz × 8 channels sustained is about 40 frames/second at
+~32 KB each, roughly 1.3 MB/s, with no sequence gaps.
+
+## Sequence numbers
+
+`seq` is monotonic per stream. The consumer logs a gap, which is how loss or
+reordering becomes visible rather than silently absorbed.
+
+Set `Nats-Msg-Id` on a publish and the broker deduplicates within its window —
+worth doing if your producer spools and replays after a network drop, which is
+exactly what the MAVLink agent does. Without it, a replayed frame is a second
+copy in the stream (the database primary key still absorbs it, but the round
+trip is wasted and the gap logging becomes noise).
+
+## Other payloads on the same subject
+
+| Message | For |
+|---|---|
+| `TelemetryFrame` | Synchronised columnar data. The default |
+| `CcsdsPacketBatch` | Raw CCSDS space packets, decoded consumer-side against an XTCE database |
+| `MavlinkFrameBatch` | Raw MAVLink frames, decoded consumer-side against a pinned dialect |
+
+The last two exist so the vehicle-side agent never has to hold a decode
+dictionary: it frames structurally and forwards bytes, and the consumer — which
+can be updated without touching anything in the field — owns the interpretation.
+
+## Delivery
+
+At-least-once. The consumer acknowledges a frame only after its rows are
+committed, and a redelivered frame collapses onto rows already written via the
+`(time, dataset_id)` primary key.
+
+Reference producer implementation: `cmd/loadgen` in
+[`xpectra-consumer`](https://github.com/xpectraflow/xpectra-consumer), which is
+also what the published throughput numbers were measured with.

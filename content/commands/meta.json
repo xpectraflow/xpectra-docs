@@ -1,0 +1,5 @@
+{
+  "title": "Commands",
+  "description": "How a command reaches your system, and what you must do with it.",
+  "pages": ["index", "arming", "receiver", "lifecycle"]
+}

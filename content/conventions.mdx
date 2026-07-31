@@ -1,40 +1,72 @@
 ---
 title: API conventions
-description: The rules every /api/v1 endpoint follows, so the endpoint pages can be short.
+description: The rules every endpoint follows, so the endpoint pages can be short.
 ---
 
-Read this once and the reference pages get much shorter. Every endpoint under
-`/api/v1` obeys all of it.
+Read this once and the rest of the reference gets much shorter. Every endpoint
+below obeys all of it.
 
-<Callout type="warn">
-**Rollout in progress.** The only endpoints live today are
-`POST /api/v1/auth/token` and `/.well-known/jwks.json`. Authentication, errors,
-request ids and types below are all in force on those. The verb and deprecation
-sections describe the contract the resource endpoints will land under — they are
-the rules we are building to, not a description of something you can call yet.
-This page will lose the notice when the resource endpoints ship.
+## Base URL and endpoints
+
+```
+https://app.xpectraflow.com
+```
+
+This is the whole HTTP surface. Each row links to the page that documents it in
+full.
+
+| | Endpoint | Scope |
+|---|---|---|
+| `GET` | [`/api/experiments/list`](/api/experiments) | `experiments:read` |
+| `GET` | [`/api/experiments/get`](/api/experiments) | `experiments:read` |
+| `POST` | [`/api/experiments/create`](/api/experiments) | `experiments:write` |
+| `POST` | [`/api/experiments/update`](/api/experiments) | `experiments:write` |
+| `GET` | [`/api/datasets/list`](/api/datasets) | `datasets:read` |
+| `GET` | [`/api/datasets/get`](/api/datasets) | `datasets:read` |
+| `POST` | [`/api/datasets/create`](/api/datasets) | `datasets:write` |
+| `POST` | [`/api/datasets/update`](/api/datasets) | `datasets:write` |
+| `POST` | [`/api/datasets/append`](/api/datasets) | `telemetry:write` |
+| `GET` | [`/api/datasets/channels`](/api/channels) | `datasets:read` |
+| `POST` | [`/api/datasets/channels/create`](/api/channels) | `datasets:write` |
+| `POST` | [`/api/datasets/channels/update`](/api/channels) | `datasets:write` |
+| `GET` | [`/api/datasets/events`](/api/events) | `events:read` |
+| `POST` | [`/api/datasets/events`](/api/events) | `events:write` |
+| `POST` | [`/api/commands/create`](/api/commands) | `commands:write` |
+| `GET` | [`/api/commands/list`](/api/commands) | `commands:read` |
+| `POST` | [`/api/commands/dispatch`](/api/commands) | `commands:write` |
+| `POST` | [`/api/commands/ack`](/api/commands) | *(one-time token)* |
+| `POST` | [`/api/datasets/arm`](/commands/arming) | `commands:write` |
+| `POST` | [`/api/datasets/disarm`](/commands/arming) | `commands:write` |
+| `GET` | [`/api/datasets/arming`](/commands/arming) | `commands:read` |
+| `GET` | [`/api/webhooks/list`](/api/webhooks) | `webhooks:read` |
+| `GET` | [`/api/webhooks/deliveries`](/api/webhooks) | `webhooks:read` |
+| `POST` | [`/api/webhooks/create`](/api/webhooks) | `webhooks:write` |
+| `POST` | [`/api/webhooks/rotate`](/api/webhooks) | `webhooks:write` |
+| `POST` | [`/api/webhooks/delete`](/api/webhooks) | `webhooks:write` |
+| `POST` | [`/api/streams/register`](/ingestion/register-a-stream) | `datasets:write` |
+| `GET` | [`/api/keys/list`](/api/api-keys) | `keys:read` |
+| `POST` | [`/api/keys/revoke`](/api/api-keys) | `keys:write` |
+
+Sustained ingestion does not go over HTTP — it goes over gRPC at
+`app.xpectraflow.com:50051`, authenticated with the same key. `append` is for
+batches, backfills and slow sensors, not for a 10 kHz feed. Anything you find
+outside the table above is internal and may change without notice.
+
+<Callout type="info">
+There is no `/api/v1` prefix. An earlier draft of these docs described one; the
+endpoints under it were never built, and versioning will be introduced when
+there is a second version to distinguish from — not before.
 </Callout>
-
-## Base URL and version
-
-```
-https://app.xpectraflow.com/api/v1
-```
-
-The version is in the path and will change only for a breaking change. There are
-no unversioned public endpoints — anything you find outside `/api/v1` is either
-internal or deprecated.
 
 ## Authentication
 
 One header, everywhere, including gRPC metadata:
 
 ```
-Authorization: Bearer <access_token>
+x-api-key: sk_xp_…
 ```
 
-`x-api-key: sk_xp_…` remains accepted for existing integrations. See
-[Authentication](/authentication).
+See [Authentication](/authentication) for creating and scoping a key.
 
 ## Errors
 
@@ -44,7 +76,7 @@ Every failure has the same shape:
 {
   "error": {
     "code": "insufficient_scope",
-    "message": "This credential lacks the datasets:write scope.",
+    "message": "This API key lacks the datasets:write scope.",
     "details": [],
     "request_id": "31592257-1558-48ed-8328-a5086ccfa4ed"
   }
@@ -57,11 +89,8 @@ human reading logs and may be reworded.
 | Status | `code` | Means |
 |---|---|---|
 | 400 | `invalid_request` | Malformed body or parameters; see `details` |
-| 400 | `invalid_scope` | Asked for a scope the client is not permitted |
-| 400 | `unsupported_grant_type` | Only `client_credentials` is supported |
-| 401 | `unauthorized` | Missing, malformed, unknown or expired credential |
-| 401 | `invalid_client` | Client authentication failed at the token endpoint |
-| 403 | `insufficient_scope` | Authenticated, but the credential lacks the scope |
+| 401 | `unauthorized` | Missing, malformed, expired or revoked key |
+| 403 | `insufficient_scope` | Authenticated, but the key lacks the scope |
 | 403 | `forbidden` | Authenticated and scoped, but not allowed |
 | 404 | `not_found` | No such resource — **or** it is not yours |
 | 409 | `conflict` | Name already taken, or a state conflict |
@@ -83,12 +112,12 @@ one thing worth withholding from someone guessing ids.
 ## Request ids
 
 Send `X-Request-Id` and it is echoed back and used in our logs. Send nothing and
-one is generated. Either way it appears on the response and inside every error
-body — quote it when reporting a problem.
+one is generated. Either way it appears on the response — on success as well as
+failure — and inside every error body. Quote it when reporting a problem.
 
 ```bash
-curl -s https://app.xpectraflow.com/api/v1/experiments \
-  -H "Authorization: Bearer $TOKEN" \
+curl -si https://app.xpectraflow.com/api/experiments/list \
+  -H "x-api-key: $XPECTRA_API_KEY" \
   -H "X-Request-Id: my-job-42"
 ```
 
@@ -99,7 +128,7 @@ curl -s https://app.xpectraflow.com/api/v1/experiments \
 | **Casing** | `camelCase` in JSON bodies and query parameters |
 | **Timestamps** | RFC 3339, UTC, milliseconds — `2026-07-30T12:00:00.000Z` |
 | **Ids** | UUID v4 strings |
-| **Content type** | `application/json`, except the token endpoint, which is form-encoded because RFC 6749 says so |
+| **Content type** | `application/json` |
 
 The protobuf definitions use `snake_case` and epoch nanoseconds. That boundary is
 the gRPC and NATS wire format only; nothing in the HTTP API uses it.
@@ -108,19 +137,38 @@ the gRPC and NATS wire format only; nothing in the HTTP API uses it.
 
 | | |
 |---|---|
-| `GET` | Read. Never changes anything |
-| `POST` | Create. Returns `201` and a `Location` header |
-| `PATCH` | Partial update. Send only the fields you are changing |
-| `DELETE` | Returns `204` with no body. Idempotent |
+| `GET` | Read, with query parameters. Never changes anything |
+| `POST` | Create or change. Returns `200` and the resulting resource |
 
-## Deprecation
+`PATCH` is not offered, and neither is pagination: the list endpoints return
+everything they match, ordered newest first. Both will arrive with a documented
+shape rather than appearing quietly.
 
-A deprecated endpoint keeps working and announces itself:
+### Nothing here deletes anything
 
-```
-Deprecation: true
-Sunset: Wed, 31 Dec 2026 23:59:59 GMT
-```
+There is no endpoint that deletes an experiment, a dataset or a channel, and
+this is not an omission waiting to be filled.
 
-Nothing is removed without a `Sunset` date having been served for a good while
-first. If you are automating against us, log these headers.
+An API key is a static string that lives in a config file on a machine you may
+not fully control. Deleting an experiment cascades to its datasets and their
+telemetry, so a single leaked producer credential would be enough to erase a
+test campaign — and the scope that credential needs for its actual job,
+`telemetry:write`, is one a producer legitimately holds.
+
+The demand for scripted deletion is close to zero next to that. Delete from the
+console, where a human is present and the action is attributable to them.
+
+The one exception is `/api/webhooks/delete`, which unregisters a delivery
+target. That destroys no data, and being unable to stop deliveries over the API
+would make the feature less safe rather than more.
+
+### Updates replace, they do not merge
+
+`POST /api/experiments/update` and `POST /api/datasets/update` are full
+replacements of the mutable fields. Omitting `description` clears it; omitting a
+required field is a `400`.
+
+This is stated rather than smoothed over because the alternative — accepting a
+partial body and merging — makes it possible to erase a field by forgetting it,
+and a validation error is a much better outcome than a silently blanked
+description.

@@ -1,4 +1,16 @@
 {
   "title": "Documentation",
-  "pages": ["index", "concepts", "authentication", "conventions"]
+  "pages": [
+    "index",
+    "quickstart",
+    "concepts",
+    "authentication",
+    "conventions",
+    "---API reference---",
+    "api",
+    "---Guides---",
+    "ingestion",
+    "commands",
+    "guides"
+  ]
 }

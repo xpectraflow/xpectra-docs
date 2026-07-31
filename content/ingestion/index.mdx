@@ -1,0 +1,83 @@
+---
+title: Choosing an ingestion path
+description: Three ways in. Which one you want depends almost entirely on rate.
+---
+
+| Path | Good for | Roughly | Drive it with |
+|---|---|---|---|
+| [HTTP append](/ingestion/http-append) | Backfills, slow sensors, scripts | up to a few hundred points/s | `curl` |
+| [gRPC streaming](/ingestion/grpc-streaming) | Sustained sensor feeds | 10 kHz, validated to 20 kHz | Python SDK, Go |
+| [NATS JetStream](/ingestion/nats-jetstream) | First-party high-rate producers | 20 kHz+ | Go, internal network |
+
+If you are not sure, start with HTTP. It is the only one you can drive with
+`curl`, and moving to gRPC later does not change the data model — the same
+dataset, the same `ch_N` columns, the same channel list.
+
+## The one decision that is hard to undo
+
+Every path begins the same way: [register a stream](/ingestion/register-a-stream)
+to get a dataset and its channel columns. That call takes a **storage shape**,
+and it is fixed for the life of the dataset.
+
+<Cards>
+  <Card title="Wide — one column per channel">
+    Your sensors sample together on a shared clock. A frame is a row: one
+    timestamp, N values.
+
+    Thrust, pressure, temperature at 1 kHz. Almost every test-stand and DAQ
+    setup.
+  </Card>
+  <Card title="Narrow — one row per measurement">
+    Your source emits unrelated messages at unrelated rates with no shared
+    frame.
+
+    MAVLink: attitude at 50 Hz, GPS at 5 Hz, a status string when something has
+    something to say.
+  </Card>
+</Cards>
+
+Wide is the default and what you want unless you are ingesting MAVLink. The
+difference is not cosmetic:
+
+|  | Wide | Narrow |
+|---|---|---|
+| Channels | Declared at registration | Discovered from the data |
+| Addressed by | `ch_0`, `ch_1`, … | Signal name (`mavlink.ATTITUDE.roll`) |
+| HTTP append | Supported | **Refused** |
+| Primary key | `(time, dataset_id)` | includes `frame_seq` |
+
+Narrow refuses HTTP append because its primary key includes a frame sequence
+that only the producing agent can assign — it exists so a redelivered frame
+collapses onto the row it already wrote, and inventing one would destroy exactly
+that property.
+
+## Rate, honestly
+
+HTTP append caps at 5000 rows per request. At one request per second that is
+5000 points/s of a single channel — but each request is a round trip, a
+transaction, and a timestamp per row.
+
+The columnar frame formats used by gRPC and NATS send one base timestamp and a
+sample period for the whole frame, then packed arrays per channel. At 20 kHz
+across 8 channels that is about 40 frames a second and 1.3 MB/s, which is
+roughly a thousandth of the requests HTTP would need.
+
+So: **HTTP for anything human-triggered, gRPC for anything continuous.** The
+crossover is somewhere around a few hundred points a second, and you will feel
+it as latency long before you hit a limit.
+
+## Getting data back out
+
+Not over HTTP. Bulk queries go over gRPC `Query`, which downsamples server-side
+rather than shipping every raw point — a 20-minute flight at 10 kHz is 12
+million rows per channel, and no JSON response should be that.
+
+The console uses its own internal path for the same reason.
+
+## Next
+
+<Cards>
+  <Card title="Register a stream" href="/ingestion/register-a-stream" description="The handshake every path starts with." />
+  <Card title="HTTP append" href="/ingestion/http-append" description="Batches over curl." />
+  <Card title="Python SDK" href="/ingestion/python-sdk" description="The shortest path from a sensor loop to stored telemetry." />
+</Cards>

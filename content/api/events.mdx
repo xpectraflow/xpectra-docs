@@ -1,0 +1,228 @@
+---
+title: Events
+description: Annotate a run — including live, mid-stream, with absolute timestamps.
+---
+
+An event marks a span on a dataset's timeline: a link loss, a mode change, an
+anomaly somebody wants to find again. Events are what turn a wall of samples
+into something a person can navigate.
+
+This is a **write-in** API. You post events to us; we do not post events to you.
+Nothing here delivers anything outbound — the only thing XpectraFlow sends to
+your systems is a [command](/commands), and that is a separate mechanism.
+
+## Append events
+
+<Endpoint method="POST" path="/api/datasets/events" scope="events:write" />
+
+Append-only. This never replaces a dataset's event list, so a producer reporting
+one link loss cannot erase what was already recorded for the flight.
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", required: true },
+    datasetId: { type: "string", required: true },
+    events: {
+      type: "Event[]",
+      description: "1–500 events. Shape below.",
+      required: true,
+    },
+  }}
+/>
+
+Each `Event`:
+
+<TypeTable
+  type={{
+    label: { type: "string", description: "1–200 characters. The thing shown on the chart.", required: true },
+    startTime: { type: "number", description: "Seconds from the dataset's T=0. Pair with endTime." },
+    endTime: { type: "number", description: "Seconds from T=0." },
+    startAt: { type: "string", description: "RFC 3339 absolute instant. Pair with endAt." },
+    endAt: { type: "string", description: "RFC 3339 absolute instant." },
+    id: { type: "string", description: "Your own UUID. Supply it to make retries idempotent." },
+    relParam: { type: "string", description: 'Related signal, e.g. "mavlink.STATUSTEXT.text".' },
+    description: { type: "string", description: "Up to 2000 characters." },
+    color: { type: "string", description: "Up to 32 characters." },
+  }}
+/>
+
+### Two ways to say when
+
+Send **either** `startTime`/`endTime` **or** `startAt`/`endAt` — one pair per
+event, never both, never half of one. Sending both, or only one of a pair, is a
+`400`.
+
+<Tabs items={["Absolute (live streams)", "Relative (post-processing)"]}>
+<Tab value="Absolute (live streams)">
+
+Use this while a stream is running. Your producer knows what time it is; it does
+not know the dataset's T=0, because that is a property of the first sample it
+may never have observed.
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/datasets/events \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "events": [{
+      "label": "LINK_LOSS",
+      "startAt": "2026-07-31T09:20:54.500Z",
+      "endAt": "2026-07-31T09:21:00.900Z",
+      "relParam": "mavlink.HEARTBEAT",
+      "description": "No heartbeat for 6.4s"
+    }]
+  }'
+```
+
+</Tab>
+<Tab value="Relative (post-processing)">
+
+Use this when you already have the timeline — a script walking a completed run,
+or a reprocessing job that computed offsets from the data.
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/datasets/events \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "events": [{
+      "label": "Ignition",
+      "startTime": 412.7,
+      "endTime": 412.7
+    }]
+  }'
+```
+
+</Tab>
+</Tabs>
+
+Mixing the two forms inside one batch is allowed — a batch may be assembled from
+two producers.
+
+### Response
+
+```json
+{
+  "accepted": 1,
+  "anchor": { "source": "hypertable", "at": "2026-07-31T09:14:02.310Z" },
+  "events": [
+    { "id": "b31d…", "startTime": 412.19, "endTime": 418.59 }
+  ]
+}
+```
+
+- **`accepted`** is the number of rows that actually landed, not the number you
+  sent. A retry that collapses onto rows already written reports `0`, which is
+  the honest answer.
+- **`anchor`** is the T=0 your absolute timestamps were measured against, and
+  `null` when you sent relative seconds. `source` is `hypertable` when it came
+  from the data and `startedAt` when the dataset has no rows yet.
+- **`events`** echoes the resolved relative seconds. Check them once when you
+  build the integration — it is much cheaper than discovering a conversion was
+  wrong from a chart a week later.
+
+## Read events back
+
+<Endpoint method="GET" path="/api/datasets/events" scope="events:read" />
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", required: true },
+    datasetId: { type: "string", required: true },
+  }}
+/>
+
+```bash
+curl -s "https://app.xpectraflow.com/api/datasets/events?experimentId=$EXPERIMENT_ID&datasetId=$DATASET_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+```json
+[
+  {
+    "id": "b31d…",
+    "label": "IGNITION",
+    "startTime": 0.0,
+    "endTime": 3.0,
+    "duration": 3.0,
+    "relParam": "",
+    "description": "Valve open, thrust ramping",
+    "color": null,
+    "createdAt": "2026-07-31T12:00:04.180Z"
+  }
+]
+```
+
+In timeline order. `startTime` and `endTime` are always **seconds from T=0**,
+whichever form they were written in — so a client that posted `startAt` reads
+back the resolved relative value, which is also what the charts draw.
+
+## How the conversion works
+
+For an absolute instant, the stored value is:
+
+```
+relSeconds = (yourInstant − anchor) / 1000
+```
+
+where `anchor` is `MIN(time)` from the dataset's hypertable — the same value the
+charts use to place telemetry.
+
+<Callout type="info">
+`timeOffsetMs` deliberately plays no part in this. It is a **render-time**
+alignment, applied equally to events and to telemetry when they are drawn, so it
+cancels out of the conversion. Subtracting it here would shift every event by
+the offset — an error invisible on the majority of datasets, whose offset is
+zero, and silently wrong on every aligned one.
+</Callout>
+
+Instants before T=0 are fine and produce negative seconds. A pre-trigger
+annotation on the arming sequence is a legitimate thing to record.
+
+## Idempotency
+
+Supply your own `id` and retrying is free — a redelivered append collapses onto
+the row it already wrote instead of double-marking the timeline. Omit it and
+every call creates new rows.
+
+```json
+{ "id": "0d6a5b1c-2e94-4a7f-9c31-8b02d5e6f7a1", "label": "LINK_LOSS", "startAt": "…", "endAt": "…" }
+```
+
+This is how the MAVLink agent reports link loss without duplicating markers
+across a reconnect.
+
+## Errors
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | Both time forms, one half of a pair, empty `label`, more than 500 events |
+| 403 | `insufficient_scope` | Key lacks `events:write` (or `events:read` to list) |
+| 404 | `not_found` | No such dataset in this organization, or it is not under that experiment |
+| 409 | `conflict` | Absolute timestamps on a dataset with no timeline yet |
+
+The `409` is worth planning for. A dataset that has registered but received no
+telemetry has no T=0 to measure against, and guessing one would put events
+somewhere plausible and wrong. Send relative seconds, or post the events once
+data has started arriving.
+
+## What to record
+
+<Accordions>
+  <Accordion title="LINK_LOSS — the one that cannot be reconstructed">
+    "We do not know what happened here" and "nothing happened here" look
+    identical downstream: both are absent rows. A chart that interpolates across
+    the first is drawing an altitude nobody measured. Only the producer can tell
+    the two apart, which is why it has to say so at the time.
+  </Accordion>
+
+  <Accordion title="What is not an event">
+    An agent-to-server network outage is **not** an event. Frames spooled through
+    a drop arrive late but complete, so nothing is unknown and the timeline
+    should stay unmarked. Marking it trains people to ignore the markers.
+  </Accordion>
+</Accordions>

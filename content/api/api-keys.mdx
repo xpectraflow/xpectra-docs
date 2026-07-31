@@ -1,0 +1,173 @@
+---
+title: API keys
+description: List and revoke keys from the API. Creating one is console-only, deliberately.
+---
+
+Two operations, and one conspicuous absence.
+
+| | |
+|---|---|
+| List the organization's live keys | `GET /api/keys/list` |
+| Revoke one | `POST /api/keys/revoke` |
+| **Create one** | **Console only.** No scope grants it |
+
+## Why there is no create endpoint
+
+Revocation is the only lever this product has against a leaked credential.
+`revokedAt` exists precisely so a key can be killed mid-flight.
+
+A key that can mint keys defeats that lever entirely. Whoever holds the leaked
+one mints a fresh key, with a fresh hash and a long expiry, and revoking the
+original accomplishes nothing. Worse, the audit trail then reads *"a legitimate
+key created a key"* — a sentence with no anomaly in it, which is exactly the
+sentence an incident review needs to find.
+
+The operational need people actually have is fleet rotation and incident
+response: *list every key we hold, kill the ones on the compromised host*. Both
+of those are read and revoke. Creating a credential is something a human does
+once, in a browser, and pastes into a config.
+
+So: create a key in the console at **Settings → API Keys → Generate**. See
+[Authentication](/authentication) for the walkthrough.
+
+## Scopes
+
+Both operations use a `keys` scope, and neither is granted by default.
+
+| Scope | Grants |
+|---|---|
+| `keys:read` | List the organization's live keys |
+| `keys:write` | Revoke a key. **Does not grant creating one** |
+
+<Callout type="warn">
+`keys:write` is the one scope whose name overstates what it does. It follows the
+`<resource>:<action>` convention for consistency; it revokes and nothing else.
+
+It is also **owner-only**. Only a workspace owner can create a key carrying
+`keys:write` or `webhooks:write`, because both change the organization's
+security posture rather than its data — and a key should never reach further
+than the person who minted it.
+</Callout>
+
+## List keys
+
+<Endpoint method="GET" path="/api/keys/list" scope="keys:read" />
+
+No parameters. Revoked keys are omitted — a list that shows dead credentials
+trains people to ignore the list.
+
+```bash
+curl -s https://app.xpectraflow.com/api/keys/list \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+```json
+[
+  {
+    "id": "4c1e9a72-3b58-4f01-9d6a-2e7f0c8b1d43",
+    "name": "sitl-gateway",
+    "keyPrefix": "sk_xp_2f",
+    "keySuffix": "9c4e",
+    "scopes": ["telemetry:write", "datasets:write"],
+    "lastUsedAt": "2026-07-31T09:41:02.884Z",
+    "expiresAt": "2026-10-29T00:00:00.000Z",
+    "createdAt": "2026-07-31T08:55:19.220Z"
+  }
+]
+```
+
+The key itself is not here and cannot be — only a SHA-256 digest is stored.
+`keyPrefix` and `keySuffix` are enough to render `sk_xp_2f…9c4e` and match a row
+against the value in a config file, and not enough to authenticate with.
+
+<Callout type="info">
+`lastUsedAt` is the field worth building on. It turns *"which of these eleven
+keys can we safely kill"* from a guess into a query. It is written
+fire-and-forget on every authenticated request, so it can lag by a moment under
+load — treat it as "recently used", not as an exact timestamp.
+</Callout>
+
+## Revoke a key
+
+<Endpoint method="POST" path="/api/keys/revoke" scope="keys:write" />
+
+<TypeTable
+  type={{
+    id: { type: "string", description: "UUID from the list endpoint.", required: true },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/keys/revoke \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "4c1e9a72-3b58-4f01-9d6a-2e7f0c8b1d43"}'
+```
+
+```json
+{ "success": true, "alreadyRevoked": false }
+```
+
+A repeat call returns `alreadyRevoked: true` and still succeeds. You asked for a
+state and the state holds; erroring would make a double-click look like a bug.
+
+Revocation is a timestamp, not a delete. The row survives, so *"what was this
+credential doing before we killed it"* remains answerable — which is the only
+moment anyone asks.
+
+### A key cannot revoke itself
+
+```json
+{
+  "error": {
+    "code": "conflict",
+    "message": "A key cannot revoke itself. Revoke it from the console, or from a different key.",
+    "details": [],
+    "request_id": "31592257-1558-48ed-8328-a5086ccfa4ed"
+  }
+}
+```
+
+Without this, a rotation script with an off-by-one turns into an outage with no
+recovery path except a browser session.
+
+<Callout type="warn">
+**Revocation lags on gRPC by up to five minutes.** The ingest service caches key
+validity so a 20 kHz stream is not doing an HTTP round trip per connection. A
+revoked key can keep streaming for the length of that cache.
+
+If you are revoking because a key leaked, stop the stream as well.
+</Callout>
+
+## Rotating a fleet
+
+The intended shape, using only these two endpoints plus one console visit:
+
+<Steps>
+<Step>
+**Mint the replacement in the console.** One key per host, named after the host.
+</Step>
+<Step>
+**Deploy it.** The old key still works; there is no cutover window.
+</Step>
+<Step>
+**Confirm the new key is live.** `GET /api/keys/list` and check `lastUsedAt` on
+the new key is recent.
+</Step>
+<Step>
+**Revoke the old one** by id, from a *different* key — a script cannot revoke
+the credential it is authenticating with.
+</Step>
+<Step>
+**Wait five minutes** before assuming gRPC ingest with the old key has stopped.
+</Step>
+</Steps>
+
+## Errors
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | `id` missing or not a UUID |
+| 403 | `insufficient_scope` | Key lacks `keys:read` or `keys:write` |
+| 404 | `not_found` | No such key, or it belongs to another organization |
+| 409 | `conflict` | The key tried to revoke itself |

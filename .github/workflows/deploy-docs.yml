@@ -77,14 +77,36 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
 
+      # Derived from content/ rather than hardcoded. The previous list named four
+      # pages and stopped covering the site the moment a fifth was added — a
+      # smoke test that silently narrows is worse than none, because it keeps
+      # reporting success over the part it still checks.
+      #
+      # index.mdx maps to "/", everything else to its path without the
+      # extension. Folder meta.json files are not pages and are skipped.
       - name: Smoke test
         run: |
           set -euo pipefail
-          for path in / /concepts /authentication /conventions; do
+          paths=$(
+            find content -name '*.mdx' \
+              | sed -e 's|^content||' -e 's|\.mdx$||' -e 's|/index$||' \
+              | sed -e 's|^$|/|' \
+              | sort -u
+          )
+          echo "checking $(echo "$paths" | wc -l | tr -d ' ') pages"
+          fail=0
+          for path in $paths; do
             code=$(curl -s -o /dev/null -w '%{http_code}' "https://docs.xpectraflow.com${path}")
             echo "  ${path} -> ${code}"
-            [ "$code" = "200" ] || { echo "::error::${path} returned ${code}"; exit 1; }
+            if [ "$code" != "200" ]; then
+              echo "::error::${path} returned ${code}"
+              fail=1
+            fi
           done
+          # Every failing page is reported, not just the first — one broken link
+          # in a deploy is usually several, and finding them one CI run at a
+          # time is a bad way to spend an afternoon.
+          [ "$fail" = "0" ]
 
   # Tell the platform repo which docs commit is now live. This does not deploy
   # anything — the site already updated above — it keeps the submodule pointer

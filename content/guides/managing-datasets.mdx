@@ -1,0 +1,97 @@
+---
+title: Managing datasets
+description: Renaming, aligning, archiving and deleting — what the console does that the API deliberately does not.
+---
+
+Most dataset operations are on [the API](/api/datasets). This page covers the
+ones that are console-only, and why.
+
+## Deleting
+
+**Experiments → dataset → ⋯ → Delete.**
+
+<Callout type="warn">
+**There is no delete endpoint, and this is not an omission waiting to be
+filled.**
+
+An API key is a static string living in a config file on a machine you may not
+fully control. Deleting a dataset destroys its telemetry, and the scope a
+producer legitimately needs for its actual job — `telemetry:write` — would be
+enough. One leaked producer credential should not be able to erase a test
+campaign.
+
+The demand for scripted deletion is close to zero next to that risk. Delete in
+the console, where a human is present and the action is attributable.
+</Callout>
+
+The same applies to experiments and channels. Deleting an experiment cascades to
+its datasets and their telemetry.
+
+## Renaming
+
+Console or API. In the console the rename is restricted to the uploader or a
+workspace owner — a courtesy between people sharing a workspace, not a security
+boundary.
+
+It does not apply to API keys: a machine principal has no user identity to
+compare against, and its authority is already bounded by the scope it carries.
+
+## Time alignment
+
+Comparing two runs that started at different wall-clock times? **Playground →
+drag a dataset's trace → Align** saves a `timeOffsetMs` per dataset.
+
+<Callout type="info">
+`timeOffsetMs` is a **render-time** shift. It moves a dataset's traces *and* its
+events on the shared axis, together, and changes no stored value.
+
+It therefore plays no part in converting an absolute timestamp to the relative
+seconds an event is stored as — it cancels, because both sides get it. If you
+are posting events with `startAt`, you can ignore it entirely. See
+[Events](/api/events#how-the-conversion-works).
+</Callout>
+
+## Archiving
+
+Completed datasets are moved to Parquet on object storage on a schedule.
+`storageLocation` tracks where a dataset is:
+
+| Value | Means |
+|---|---|
+| `timescale` | Queryable now |
+| `archiving` | Being written to object storage |
+| `s3` | Archived. Needs restoring before it can be queried |
+| `restoring` | Coming back |
+
+A poller asking "is my data ready" wants this field, not `status`. `status`
+describes the *run* — `completed` means the vehicle stopped talking — and says
+nothing about where the rows currently live.
+
+## The DAQ group
+
+`daqName` groups datasets that were captured together, so a multi-file upload or
+a multi-vehicle sortie appears as one entry in the sidebar rather than five.
+
+Set it at upload, or with `POST /api/datasets/update`.
+
+## Dataset status
+
+| Status | Means |
+|---|---|
+| `queued` | Registered, no data yet |
+| `running` | Data arriving |
+| `completed` | Finished |
+| `failed` | Ingestion errored — check `statusDetail` |
+
+A live stream sits at `running` until the consumer sees no frames for 30 seconds,
+then closes it automatically. A stream that registered and never transmitted
+stays `queued` indefinitely, which is a real and legitimate state rather than an
+error.
+
+## `rowCount` is approximate
+
+Both the ingest consumer and the append route maintain it, and neither takes a
+lock to do so. It is right for "is data arriving" and "roughly how much"; it is
+not an audit figure.
+
+For an exact count, query the data.

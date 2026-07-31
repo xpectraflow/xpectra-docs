@@ -1,0 +1,120 @@
+---
+title: gRPC streaming
+description: The sustained path — 10 kHz, validated to 20 kHz, authenticated with the same API key.
+---
+
+For anything continuous. Same dataset, same `ch_N` columns, same channel list as
+[HTTP append](/ingestion/http-append) — only the transport changes.
+
+```
+app.xpectraflow.com:50051
+```
+
+<Callout type="warn">
+**Confirm reachability before building against this.** In the reference
+deployment the gRPC port is bound to loopback and is not exposed through the TLS
+front, so a self-hosted stack may not accept external connections on `:50051`
+without additional configuration. If you are self-hosting, check your own
+network setup; if you are on our hosted service, ask us and we will confirm what
+your account can reach.
+</Callout>
+
+## Authentication
+
+The same `x-api-key`, as gRPC metadata:
+
+```python
+metadata = [("x-api-key", api_key)]
+stub.Submit(request, metadata=metadata)
+```
+
+Scopes: `telemetry:write` to ingest, `telemetry:read` to query.
+
+<Callout type="warn">
+**Key changes lag by up to five minutes on gRPC.** The ingest service caches key
+validity so a 20 kHz stream is not doing an HTTP round trip per connection.
+
+A revoked key can keep streaming for the length of that cache, and a widened one
+takes as long to take effect. If you are revoking because a key leaked, stop the
+stream as well.
+</Callout>
+
+## The service
+
+`xpectra.telemetry.v1.TelemetryService`:
+
+| RPC | Shape | Scope |
+|---|---|---|
+| `Submit` | unary — a batch of points | `telemetry:write` |
+| `StreamSubmit` | client-streaming — header, then points | `telemetry:write` |
+| `Query` | unary — downsampled read-back | `telemetry:read` |
+
+```proto
+message TelemetryPoint {
+  google.protobuf.Timestamp timestamp = 1;
+  string channel_id = 2;
+  oneof type { string string = 3; double double = 4; float float = 5; bool bool = 6;
+               int32 int32 = 7; uint32 uint32 = 8; int64 int64 = 9; uint64 uint64 = 10;
+               bytes bit_field = 11; uint32 enum = 12;
+               google.protobuf.Empty empty = 13; bytes bytes = 14; }
+}
+```
+
+<Callout type="warn">
+**`channel_id` is the channel *index* as a string — `"0"`, `"1"` — not the
+channel UUID.**
+
+It comes from the `ch_N` column in
+`GET /api/datasets/channels`. Sending the UUID produces a stream that connects,
+authenticates, reports points accepted, and writes nothing you can read back.
+This is the most common mistake made against this API.
+</Callout>
+
+`StreamSubmit` requires the first message to be a `StreamSessionHeader` carrying
+`experiment_id` and `dataset_id`; every message after that is a point.
+
+## Reading back
+
+`Query` takes a channel list and a time range and returns **downsampled**
+series, with `total_raw_points` telling you how much it summarised.
+
+That is the point of it being gRPC rather than JSON over HTTP: a 20-minute
+flight at 10 kHz is 12 million rows per channel, and no reasonable response
+ships all of them.
+
+```proto
+message QueryRequest {
+  string experiment_id = 1;
+  string dataset_id = 2;
+  repeated string channel_ids = 3;
+  google.protobuf.Timestamp from = 4;
+  google.protobuf.Timestamp to = 5;
+  int32 max_points_per_channel = 6;
+}
+```
+
+## Getting the stubs
+
+The definitions live in
+[`xpectra-proto`](https://github.com/xpectraflow/xpectra-proto). Go stubs are
+committed; other languages generate from the `.proto` with your own toolchain.
+
+For Python, the [SDK](/ingestion/python-sdk) wraps all of this and is the
+shorter path.
+
+## Rate
+
+Validated at 20 kHz across 8 channels sustained, with no dropped frames. Guidance
+for sizing a batch: aim for a few kilobytes to tens of kilobytes per message —
+at 10–20 kHz that is roughly 200–1000 rows, giving 10–100 messages per second
+per stream.
+
+Smaller than that and per-message overhead dominates; much larger and a single
+retransmit costs more than it saves.
+
+## Next
+
+<Cards>
+  <Card title="Python SDK" href="/ingestion/python-sdk" description="The same path, without writing protobuf by hand." />
+  <Card title="NATS JetStream" href="/ingestion/nats-jetstream" description="The columnar frame format underneath, for first-party producers." />
+</Cards>

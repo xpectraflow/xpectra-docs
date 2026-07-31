@@ -40,8 +40,11 @@ content/
   meta.json           sidebar order
 ```
 
-Available components come from `fumadocs-ui/mdx` — `<Callout>`, `<Cards>`,
-`<Card>`, `<Tabs>`, plus everything in `components/mdx-components.tsx`.
+Available components are whatever `components/mdx-components.tsx` registers,
+which today is the `fumadocs-ui/mdx` defaults: `<Callout>`, `<Cards>`, `<Card>`
+and the `<CodeBlockTabs>` family. `<Tabs>`, `<Steps>`, `<Accordion>` and
+`<TypeTable>` ship in the package but are **not** registered — using one renders
+nothing. Add it to `mdx-components.tsx` first.
 
 **Every curl in these docs is expected to work as printed.** If you change an
 endpoint's behaviour, run the snippet before you change the prose.

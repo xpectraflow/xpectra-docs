@@ -1,0 +1,172 @@
+---
+title: Register a stream
+description: One call that creates the dataset, its channel columns, and the storage behind them.
+---
+
+Every ingestion path starts here. `POST /api/streams/register` creates three
+things at once:
+
+1. a **dataset** row for this run
+2. a **channel snapshot** — your channels, mapped to `ch_0`, `ch_1`, …
+3. the **hypertable** the data will actually live in, with the column types
+   your declared `dataType`s imply
+
+The third is why this call and not `datasets/create`: registration is the only
+HTTP path that leaves you with storage you can immediately write to. If it
+fails to provision, it fails the whole request rather than handing back a
+dataset whose first append would be refused.
+
+<Callout type="warn">
+Do not use `POST /api/datasets/create` for this. It makes a dataset row and
+nothing else — no channels, no storage — and appending to it fails with a `409`
+until something else provisions the table. `register` is what you want in almost
+every case.
+</Callout>
+
+## The call
+
+<Endpoint method="POST" path="/api/streams/register" scope="datasets:write" />
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", description: "UUID of the parent experiment.", required: true },
+    datasetName: { type: "string", description: "1–200 characters.", required: true },
+    channels: {
+      type: "Array<{ name: string; unit?: string; dataType?: string }>",
+      description:
+        "Up to 4096. Required for wide streams; omit for narrow. Order is significant — it fixes the ch_N indices.",
+    },
+    sampleRateHz: { type: "number", description: "Recorded on the dataset. Not enforced." },
+    format: { type: "string", description: 'Free-form provenance, e.g. "columnar-v1".' },
+    codec: { type: '"frame" | "ccsds" | "mavlink"', default: '"frame"' },
+    dialect: { type: "string", description: 'For codec "mavlink", e.g. "ardupilotmega".' },
+    storageShape: { type: '"wide" | "narrow"', default: '"wide"' },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/streams/register \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetName": "cold-flow-014",
+    "sampleRateHz": 1000,
+    "format": "columnar-v1",
+    "channels": [
+      { "name": "thrust",           "unit": "kN",  "dataType": "float" },
+      { "name": "chamber_pressure", "unit": "bar", "dataType": "float" },
+      { "name": "valve_open",       "unit": "",    "dataType": "bool"  }
+    ]
+  }'
+```
+
+```json
+{
+  "datasetId": "3d81f0a2-55c7-4f9e-9a1b-77c2e0d43a10",
+  "hypertableName": "hyper-3d81f0a2-55c7-4f9e-9a1b-77c2e0d43a10",
+  "channelIndices": [0, 1, 2],
+  "ingestToken": "b7f1…9ac2"
+}
+```
+
+## Reading the response
+
+<Accordions>
+  <Accordion title="channelIndices — the part that matters">
+    Your channels were assigned columns `ch_0`, `ch_1`, `ch_2`, **in the order
+    you declared them**. That index is how you address data from here on:
+
+    - `POST /api/datasets/append` takes `ch_N` or the channel name
+    - gRPC matches `TelemetryPoint.channel_id` against the index as a string
+    - a `TelemetryFrame` column carries `channel_index`
+
+    It is **not** the channel's UUID. A producer that stores the UUID and sends
+    it builds something that authenticates, validates, returns 200, and writes
+    nothing at all.
+  </Accordion>
+
+  <Accordion title="ingestToken — show once, then gone">
+    A per-dataset credential, returned exactly once. Only a bcrypt hash is
+    stored and no endpoint recovers it.
+
+    Most producers do not need it: the org API key authenticates gRPC and HTTP
+    append. It exists for the legacy per-dataset ingest path.
+  </Accordion>
+
+  <Accordion title="hypertableName — informational">
+    Always `hyper-<datasetId>`. You never query it directly; it appears here
+    because it is useful in a support conversation.
+  </Accordion>
+</Accordions>
+
+## Declaring channels well
+
+<Steps>
+<Step>
+### Declare all of them up front
+
+The order fixes the indices, and the column types are set from `dataType` when
+the table is created. Adding a channel later is possible but does not widen the
+table — [see the channels page](/api/channels#create-a-channel).
+</Step>
+
+<Step>
+### Get `dataType` right the first time
+
+`float` → `DOUBLE PRECISION`, `int` → `BIGINT`, `bool` → `BOOLEAN`. Changing it
+afterwards relabels the channel; it does not convert data already written or
+alter the column.
+</Step>
+
+<Step>
+### Use names you will recognise in six months
+
+`chamber_pressure`, not `ch3`. The name is what append accepts as an alias, and
+what appears on every chart axis.
+</Step>
+</Steps>
+
+## Narrow streams
+
+Omit `channels` entirely and set the shape:
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/streams/register \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetName": "sortie-2026-07-31-sysid1",
+    "storageShape": "narrow",
+    "codec": "mavlink",
+    "dialect": "ardupilotmega",
+    "format": "mavlink-raw-v1"
+  }'
+```
+
+`channelIndices` comes back empty, which is correct: a narrow dataset's signals
+are discovered from the data as it arrives, because which messages a vehicle
+sends is not knowable before it starts talking.
+
+A wide stream with no channels is rejected — a wide table's columns *are* its
+schema, so it cannot be provisioned without them:
+
+```json
+"details": [{ "field": "channels", "message": "at least one channel is required for a wide stream" }]
+```
+
+## Errors
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | No channels on a wide stream, unknown `codec`, more than 4096 channels |
+| 403 | `insufficient_scope` | Key lacks `datasets:write` |
+| 404 | `not_found` | No such experiment in this organization |
+
+## Next
+
+<Cards>
+  <Card title="HTTP append" href="/ingestion/http-append" description="Send rows with curl." />
+  <Card title="gRPC streaming" href="/ingestion/grpc-streaming" description="Sustained feeds at 10–20 kHz." />
+</Cards>

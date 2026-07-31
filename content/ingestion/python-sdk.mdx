@@ -1,0 +1,114 @@
+---
+title: Python SDK
+description: The shortest path from a sensor loop to stored telemetry.
+---
+
+```bash
+pip install xpectra
+export XPECTRA_API_KEY=sk_xp_…
+```
+
+The client reads `XPECTRA_API_KEY` from the environment, so in most cases you
+never write a header.
+
+```python
+from xpectra import Client
+
+client = Client()
+for experiment in client.experiments.list():
+    print(experiment.name)
+```
+
+## Registering and streaming
+
+```python
+from xpectra import Client
+
+client = Client()
+experiment = client.experiments.get(experiment_id)
+
+dataset = experiment.datasets.register(
+    name="cold-flow-014",
+    channels=[
+        {"name": "thrust",           "unit": "kN",  "dataType": "float"},
+        {"name": "chamber_pressure", "unit": "bar", "dataType": "float"},
+    ],
+    sample_rate_hz=1000,
+)
+
+print(dataset.id)
+```
+
+`register` posts the same body as
+[`POST /api/streams/register`](/ingestion/register-a-stream), so everything on
+that page applies — in particular, channel order fixes the `ch_N` indices.
+
+## From a live generator
+
+```python
+from datetime import datetime, timezone
+
+def my_sensor():
+    while acquiring:
+        yield datetime.now(timezone.utc), "thrust", read_adc()
+
+accepted = dataset.ingest_live(my_sensor())
+print(f"{accepted} points")
+```
+
+`ingest_live` streams without buffering the whole run in memory, which is what
+you want for anything that runs longer than it takes to fill RAM.
+
+## Configuration
+
+| | Environment | Default |
+|---|---|---|
+| API key | `XPECTRA_API_KEY` | — |
+| gRPC endpoint | `XPECTRA_ENDPOINT` | `app.xpectraflow.com:50051` |
+| HTTP base | `XPECTRA_BASE_URL` | `https://app.xpectraflow.com` |
+
+```python
+client = Client(api_key="sk_xp_…", endpoint="localhost:50051", use_tls=False)
+```
+
+## Known rough edges
+
+These are real and worth knowing before you debug them yourself.
+
+<Accordions>
+  <Accordion title="TLS is off by default">
+    `use_tls` defaults to `False`, so the gRPC connection is plaintext unless you
+    pass `use_tls=True`. Set it for anything crossing a network you do not
+    control.
+  </Accordion>
+
+  <Accordion title="A Python bool is stored as an integer">
+    The type dispatch checks `float` before `bool`, so `True` lands in the
+    `int64` field rather than the `bool` one. It round-trips as `1`/`0`.
+
+    Send `1`/`0` deliberately, or declare the channel as `int`, until this is
+    fixed.
+  </Accordion>
+
+  <Accordion title="File upload is not available to API keys">
+    `POST /api/datasets/upload` authenticates with a browser session and ignores
+    `x-api-key` entirely, so SDK calls against it return `401`. Upload files
+    through the console.
+  </Accordion>
+
+  <Accordion title="Channel ids are indices, not UUIDs">
+    The SDK derives the gRPC `channel_id` from the `ch_N` column index rather
+    than the channel UUID. If you construct requests yourself, do the same — see
+    the warning on [the channels page](/api/channels).
+  </Accordion>
+</Accordions>
+
+## When not to use it
+
+The SDK speaks the per-point gRPC path. It does not implement the columnar
+`TelemetryFrame` format that the [NATS pipeline](/ingestion/nats-jetstream) uses,
+so for genuinely high-rate first-party production you want a producer built
+against the frame format directly — `cmd/loadgen` in `xpectra-consumer` is the
+reference implementation.
+
+For everything up to a few kHz, the SDK is the right tool.

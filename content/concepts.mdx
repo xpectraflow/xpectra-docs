@@ -60,6 +60,11 @@ registering a live stream. Creating one returns an **ingest token exactly once**
 — it is stored only as a bcrypt hash, so if you lose it you create a new dataset
 rather than recovering the old token.
 
+That token is not an alternative to your API key. It is issued by the platform,
+scoped to this one dataset, and exists so a producer can be handed the narrowest
+possible credential for a single run. The key you create in the console is the
+one you authenticate with; see [Authentication](/authentication).
+
 Each dataset gets its own TimescaleDB hypertable named `hyper-<dataset-id>`.
 
 ### Wide and narrow

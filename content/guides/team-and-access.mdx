@@ -1,0 +1,111 @@
+---
+title: Team and access
+description: Workspaces, join codes, invitations and roles — all of it in the console.
+---
+
+Team management has no API. Everything here is done by a person in a browser,
+deliberately: adding someone to a workspace grants access to every experiment in
+it, and that is a decision worth having a human and a session behind.
+
+## Workspaces
+
+A workspace (an *organization*) owns experiments, datasets, API keys and webhook
+endpoints. Everything is scoped to exactly one — there is no cross-workspace
+sharing, and an API key reaches exactly one workspace.
+
+Create one at **Organizations → Create**, choosing a type (personal, startup,
+educational, company). The type is descriptive; it does not change permissions.
+
+## Two roles
+
+| Role | Can |
+|---|---|
+| **Member** | Everything to do with data: experiments, datasets, uploads, charts, commands, API keys with everyday scopes |
+| **Owner** | All of that, plus manage members, delete or restore the workspace, and grant `keys:write` and `webhooks:write` |
+
+There is no read-only role today. A member is a full participant in the
+workspace's data.
+
+<Callout type="info">
+The owner-only scopes are the two that change the workspace's security posture
+rather than its data — `keys:write` revokes credentials, `webhooks:write`
+decides where command traffic is delivered. A key should never reach further
+than the person who minted it, which is why a member cannot create one carrying
+either. See [API keys](/api/api-keys).
+</Callout>
+
+## Adding people
+
+<Tabs items={["Invite by email", "Share a join code"]}>
+<Tab value="Invite by email">
+
+**Organizations → Members → Add member**, then their email address.
+
+- Already have an account? Added immediately.
+- Don't? Invited — they get access when they register with that address.
+
+</Tab>
+<Tab value="Share a join code">
+
+Better for onboarding several people at once. Find the code at
+**Organizations → your workspace**, share it internally, and each person enters
+it at **Organizations → Join**.
+
+A join request appears for an owner to **approve** or **reject** at
+**Organizations → Members → Requests**. The code alone does not grant access.
+
+</Tab>
+</Tabs>
+
+## The domain lock
+
+Both paths enforce the same rule: **the joiner's email domain must match the
+workspace's**. Someone at `@example.com` cannot join a workspace registered to
+`@yourcompany.com`, even holding a valid join code.
+
+<Callout type="warn">
+This is the property that makes a join code safe to paste into a company chat.
+A code that worked for anyone who saw it would be a password with a friendlier
+name, and codes leak — they get forwarded, pasted into tickets, screenshotted
+into onboarding docs.
+
+With the domain lock, a leaked code is only usable by people who already have
+your company's email, and an owner still has to approve the request.
+</Callout>
+
+Consequence worth planning for: **contractors and partners on their own email
+domains cannot be added this way.** Give them an account on your domain, or a
+separate workspace.
+
+Join attempts are rate-limited per user, so a code cannot be brute-forced.
+
+## Removing people
+
+**Organizations → Members → Remove**, or **Revoke** on a pending invitation.
+
+<Callout type="warn">
+Removing someone does **not** revoke API keys they created. A key belongs to the
+workspace, not to a person, and it keeps working after they are gone.
+
+That is the right default — an integration should not break because whoever set
+it up left — but it means offboarding has two steps. Check
+`GET /api/keys/list` and revoke anything that was theirs, using `lastUsedAt` to
+tell live keys from forgotten ones.
+</Callout>
+
+## Deleting a workspace
+
+**Organizations → Delete workspace**. A soft delete: it disappears from the
+switcher and its data is retained.
+
+An owner can restore it from **Organizations → Deleted workspaces**. There is
+deliberately no self-service permanent delete — contact us if you need one.
+
+## What this means for API keys
+
+A key is issued against one workspace and reaches only that workspace. To
+integrate against two, create two keys.
+
+Keys survive membership changes, so treat them as workspace infrastructure:
+name them after the *integration*, not the person, and one key per integration
+so revoking one is surgical.

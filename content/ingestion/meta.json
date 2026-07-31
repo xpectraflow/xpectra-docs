@@ -1,0 +1,13 @@
+{
+  "title": "Ingestion",
+  "description": "Getting data in, ordered by what you do first.",
+  "pages": [
+    "index",
+    "register-a-stream",
+    "http-append",
+    "grpc-streaming",
+    "nats-jetstream",
+    "mavlink-narrow",
+    "python-sdk"
+  ]
+}

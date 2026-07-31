@@ -1,0 +1,194 @@
+---
+title: Quickstart
+description: Key, experiment, dataset, data, back out again — in about ten minutes, with curl.
+---
+
+Everything below is `curl`. No SDK, no gRPC, no local stack. By the end you will
+have written telemetry and read it back, which is enough to know the shape of
+everything else.
+
+## Before you start
+
+<Steps>
+<Step>
+### Create an API key
+
+In the console: **Settings → API Keys → Generate**. Pick the **Read & write**
+preset — this walkthrough writes datasets, telemetry and events.
+
+The key is shown once. Put it in your shell:
+
+```bash
+export XPECTRA_API_KEY=sk_xp_…
+export XPECTRA_BASE=https://app.xpectraflow.com
+```
+</Step>
+
+<Step>
+### Check it works
+
+```bash
+curl -s $XPECTRA_BASE/api/experiments/list -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+An array — possibly empty — means you are through. A `401` means the key is
+wrong; a `403` names the scope you are missing. See
+[Authentication](/authentication).
+</Step>
+</Steps>
+
+## 1. Create an experiment
+
+The container everything else lives in.
+
+```bash
+curl -s -X POST $XPECTRA_BASE/api/experiments/create \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Quickstart", "status": "active"}'
+```
+
+```json
+{ "id": "9f2c1b44-…", "name": "Quickstart", "status": "active", "…": "…" }
+```
+
+```bash
+export EXPERIMENT_ID=9f2c1b44-…
+```
+
+## 2. Register a stream
+
+This is the call that matters, and it is easy to reach for the wrong one.
+`POST /api/datasets/create` makes an empty dataset row with no storage and no
+channels. `POST /api/streams/register` makes the dataset, its channel snapshot,
+**and** the hypertable the data goes into — which is what you almost always
+want.
+
+```bash
+curl -s -X POST $XPECTRA_BASE/api/streams/register \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetName": "quickstart-run-1",
+    "sampleRateHz": 100,
+    "channels": [
+      { "name": "thrust",           "unit": "kN",  "dataType": "float" },
+      { "name": "chamber_pressure", "unit": "bar", "dataType": "float" }
+    ]
+  }'
+```
+
+```json
+{
+  "datasetId": "3d81f0a2-…",
+  "hypertableName": "hyper-3d81f0a2-…",
+  "channelIndices": [0, 1],
+  "ingestToken": "b7f1…9ac2"
+}
+```
+
+```bash
+export DATASET_ID=3d81f0a2-…
+```
+
+<Callout type="info">
+`channelIndices` is the important part. Your channels were assigned columns
+`ch_0` and `ch_1`, **in the order you declared them**. That index — not the
+channel's UUID — is how you address the data from here on.
+</Callout>
+
+## 3. Write some rows
+
+```bash
+curl -s -X POST $XPECTRA_BASE/api/datasets/append \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "channels": ["thrust", "chamber_pressure"],
+    "rows": [
+      { "time": "2026-07-31T12:00:00.000Z", "values": [1.50, 214.7] },
+      { "time": "2026-07-31T12:00:00.010Z", "values": [1.52, 215.1] },
+      { "time": "2026-07-31T12:00:00.020Z", "values": [1.49, 214.9] }
+    ]
+  }'
+```
+
+```json
+{ "inserted": 3, "duplicates": 0, "rowCount": 3 }
+```
+
+Run it again. You get `{"inserted": 0, "duplicates": 3, "rowCount": 3}` — the
+primary key on `(time, dataset_id)` makes a replayed batch a no-op, which is
+what makes retrying safe.
+
+## 4. Mark something interesting
+
+```bash
+curl -s -X POST $XPECTRA_BASE/api/datasets/events \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "events": [{
+      "label": "Ignition",
+      "startAt": "2026-07-31T12:00:00.010Z",
+      "endAt":   "2026-07-31T12:00:00.010Z"
+    }]
+  }'
+```
+
+```json
+{
+  "accepted": 1,
+  "anchor": { "source": "hypertable", "at": "2026-07-31T12:00:00.000Z" },
+  "events": [{ "id": "b31d…", "startTime": 0.01, "endTime": 0.01 }]
+}
+```
+
+You sent an absolute instant; we converted it against the dataset's T=0 — the
+first sample you wrote in step 3 — and echoed back the stored value so you can
+check the conversion. Ten milliseconds after the start, which is right.
+
+## 5. Read it back
+
+```bash
+curl -s "$XPECTRA_BASE/api/datasets/channels?datasetId=$DATASET_ID&experimentId=$EXPERIMENT_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+```json
+[
+  { "id": "c1a7…", "name": "thrust",           "unit": "kN",  "dataType": "float", "hypertableColName": "ch_0" },
+  { "id": "de92…", "name": "chamber_pressure", "unit": "bar", "dataType": "float", "hypertableColName": "ch_1" }
+]
+```
+
+```bash
+curl -s "$XPECTRA_BASE/api/datasets/list?experimentId=$EXPERIMENT_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+`rowCount` is 3 and `startedAt`/`endedAt` now bracket what you wrote.
+
+Open the experiment in the console and the run is there, three points and an
+ignition marker on the chart.
+
+<Callout type="info">
+Reading **values** back is not on the HTTP API. Bulk queries go over gRPC
+`Query`, which returns downsampled series without shipping every raw point. The
+console uses its own internal path for the same reason. See
+[gRPC streaming](/ingestion/grpc-streaming).
+</Callout>
+
+## Where to go next
+
+<Cards>
+  <Card title="Choosing an ingestion path" href="/ingestion" description="HTTP is fine up to a few hundred points a second. Above that, read this before building." />
+  <Card title="Core concepts" href="/concepts" description="What the four nouns mean, and what wide versus narrow storage changes." />
+  <Card title="API conventions" href="/conventions" description="Errors, request ids, verbs — the rules every endpoint follows." />
+  <Card title="Commands" href="/commands" description="Getting a command out of XpectraFlow and into your own system." />
+</Cards>
