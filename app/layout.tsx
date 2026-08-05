@@ -28,7 +28,7 @@ export const metadata: Metadata = {
     template: "%s — XpectraFlow docs",
   },
   description:
-    "Ingest, query and annotate engineering telemetry over HTTP, gRPC and NATS.",
+    "Ingest, query and annotate engineering telemetry over HTTP and gRPC.",
 };
 
 /**

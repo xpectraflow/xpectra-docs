@@ -6,7 +6,6 @@
     "register-a-stream",
     "http-append",
     "grpc-streaming",
-    "nats-jetstream",
     "mavlink-narrow",
     "python-sdk"
   ]

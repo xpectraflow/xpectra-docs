@@ -8,8 +8,8 @@ things at once:
 
 1. a **dataset** row for this run
 2. a **channel snapshot** — your channels, mapped to `ch_0`, `ch_1`, …
-3. the **hypertable** the data will actually live in, with the column types
-   your declared `dataType`s imply
+3. the **time-series table** the data will actually live in, with the column
+   types your declared `dataType`s imply
 
 The third is why this call and not `datasets/create`: registration is the only
 HTTP path that leaves you with storage you can immediately write to. If it
@@ -79,7 +79,6 @@ curl -s -X POST https://app.xpectraflow.com/api/streams/register \
 
     - `POST /api/datasets/append` takes `ch_N` or the channel name
     - gRPC matches `TelemetryPoint.channel_id` against the index as a string
-    - a `TelemetryFrame` column carries `channel_index`
 
     It is **not** the channel's UUID. A producer that stores the UUID and sends
     it builds something that authenticates, validates, returns 200, and writes

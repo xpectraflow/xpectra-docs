@@ -1,6 +1,6 @@
 ---
 title: XpectraFlow API
-description: Ingest, query and annotate engineering telemetry over HTTP, gRPC and NATS.
+description: Ingest, query and annotate engineering telemetry over HTTP and gRPC.
 ---
 
 XpectraFlow stores high-rate engineering telemetry — drone flights, propulsion
@@ -18,17 +18,16 @@ the top of it. This is the reference for talking to it from your own systems.
 
 ## How data gets in
 
-Three paths, and which one you want depends almost entirely on rate.
+Two paths, and which one you want depends almost entirely on rate.
 
 | Path | Good for | Roughly |
 |---|---|---|
 | [HTTP append](/ingestion/http-append) | Scripts, backfills, slow sensors | up to a few hundred points/s |
 | [gRPC streaming](/ingestion/grpc-streaming) | Sustained sensor feeds | 10 kHz, validated to 20 kHz |
-| [NATS JetStream](/ingestion/nats-jetstream) | First-party high-rate producers | internal network only |
 
-All three start the same way — [register a
-stream](/ingestion/register-a-stream) — and share one data model, so moving
-between them later changes the transport and nothing else.
+Both start the same way — [register a stream](/ingestion/register-a-stream) —
+and share one data model, so moving between them later changes the transport and
+nothing else.
 
 If you are not sure, start with HTTP. It is the only one you can drive with
 `curl`.

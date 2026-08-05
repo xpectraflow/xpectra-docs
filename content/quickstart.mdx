@@ -61,8 +61,8 @@ export EXPERIMENT_ID=9f2c1b44-…
 This is the call that matters, and it is easy to reach for the wrong one.
 `POST /api/datasets/create` makes an empty dataset row with no storage and no
 channels. `POST /api/streams/register` makes the dataset, its channel snapshot,
-**and** the hypertable the data goes into — which is what you almost always
-want.
+**and** the time-series table the data goes into — which is what you almost
+always want.
 
 ```bash
 curl -s -X POST $XPECTRA_BASE/api/streams/register \

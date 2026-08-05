@@ -169,8 +169,8 @@ For an absolute instant, the stored value is:
 relSeconds = (yourInstant − anchor) / 1000
 ```
 
-where `anchor` is `MIN(time)` from the dataset's hypertable — the same value the
-charts use to place telemetry.
+where `anchor` is the earliest stored timestamp for the dataset — the same value
+the charts use to place telemetry.
 
 <Callout type="info">
 `timeOffsetMs` deliberately plays no part in this. It is a **render-time**

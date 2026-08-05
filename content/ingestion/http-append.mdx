@@ -45,7 +45,7 @@ is roughly ten times the payload for no added clarity.
 
 ## Retrying is free
 
-The hypertable's primary key is `(time, dataset_id)`, so a replayed batch
+The storage primary key is `(time, dataset_id)`, so a replayed batch
 re-inserts nothing:
 
 ```json
@@ -117,7 +117,7 @@ sensor does not sit unflushed for minutes.
     only the producing agent can assign.
   </Accordion>
 
-  <Accordion title="A 409 about storage means the hypertable does not exist yet">
+  <Accordion title="A 409 about storage means the table does not exist yet">
     You created the dataset with `datasets/create` rather than
     `streams/register`, and nothing has provisioned the table.
 

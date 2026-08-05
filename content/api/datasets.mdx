@@ -5,7 +5,7 @@ description: Create and read datasets, and append rows to one over HTTP.
 
 A dataset is one run: a flight, a test firing, a bench session. It belongs to an
 experiment, it owns a set of channels, and its rows live in a dedicated
-TimescaleDB hypertable named `hyper-<datasetId>`.
+time-series table named `hyper-<datasetId>`.
 
 Two things on this page are easy to conflate, so start here:
 
@@ -14,7 +14,7 @@ Two things on this page are easy to conflate, so start here:
 | An empty dataset you will fill later | `POST /api/datasets/create` |
 | A dataset ready for live telemetry, with channels | [`POST /api/streams/register`](/ingestion/register-a-stream) |
 
-`create` makes a row and nothing else — **no hypertable and no channels**. Until
+`create` makes a row and nothing else — **no storage and no channels**. Until
 one exists, appending to it fails with a `409`. `register` makes the row, the
 channel snapshot and the storage in one call, which is what you want in almost
 every case.
@@ -71,7 +71,7 @@ Three fields deserve attention:
 - **`storageLocation`** — `timescale` means queryable now. `s3` means the run
   has been archived to Parquet and needs restoring first. A poller checking "is
   my data ready" wants this, not `status`.
-- **`rowCount`** — approximate. Both the Go consumer and the append route
+- **`rowCount`** — approximate. Both the ingest pipeline and the append route
   maintain it, and neither takes a lock to do so.
 
 ## Get one dataset
@@ -179,8 +179,8 @@ send them.
 The HTTP way to add data to a dataset that already has storage. Good for
 backfills, slow sensors, and filling in what a producer missed. It is **not** the
 high-rate path — a sustained feed belongs on
-[gRPC](/ingestion/grpc-streaming) or [NATS](/ingestion/nats-jetstream), where a
-columnar frame avoids re-sending a timestamp per row.
+[gRPC](/ingestion/grpc-streaming), where a columnar frame avoids re-sending a
+timestamp per row.
 
 Note the scope: `telemetry:write`, not `datasets:write`. This writes telemetry,
 not metadata, and it is the same scope gRPC ingest requires — so a producer that
@@ -229,10 +229,10 @@ curl -s -X POST https://app.xpectraflow.com/api/datasets/append \
 
 <Accordions>
   <Accordion title="Timestamps must be unique within a batch">
-    The hypertable's primary key is `(time, dataset_id)`. Two rows at the same
-    instant would collapse into one under `ON CONFLICT DO NOTHING` — the request
-    would succeed and quietly store less than you sent. So a duplicate inside one
-    batch is rejected with `400` instead.
+    The storage primary key is `(time, dataset_id)`. Two rows at the same
+    instant would collapse into one, because a conflicting row is ignored rather
+    than written — the request would succeed and quietly store less than you
+    sent. So a duplicate inside one batch is rejected with `400` instead.
 
     If your sampling genuinely produces two readings at the same millisecond, you
     need finer timestamps, not two rows.
@@ -248,10 +248,10 @@ curl -s -X POST https://app.xpectraflow.com/api/datasets/append \
   </Accordion>
 
   <Accordion title="The column has to exist already">
-    Appending never alters the table. Column DDL belongs to the Go consumer,
-    which knows the chunk interval, the compression settings and the type map a
-    column needs to be correct — a column created from the API side would be
-    subtly wrong forever.
+    Appending never alters the table. Adding a column belongs to the ingest
+    pipeline, which knows the partitioning, the compression settings and the type
+    map a column needs to be correct — a column created from the API side would
+    be subtly wrong forever.
 
     An unresolvable channel comes back as a `400` naming the field:
 
@@ -271,7 +271,7 @@ curl -s -X POST https://app.xpectraflow.com/api/datasets/append \
   </Accordion>
 
   <Accordion title="Large batches are split for you">
-    Postgres caps a statement at 65535 bind parameters and each row costs
+    The storage engine caps a statement at 65535 bind parameters and each row costs
     `2 + channels.length`, so 5000 rows of 50 channels would be 260 000. The
     route chunks internally inside one transaction. You do not need to do
     anything, but it is why a very wide batch is slower than a narrow one of the
@@ -286,7 +286,7 @@ curl -s -X POST https://app.xpectraflow.com/api/datasets/append \
 | 400 | `invalid_request` | Duplicate timestamps, unknown channel, `values` length mismatch, unparseable time |
 | 403 | `insufficient_scope` | Key lacks `telemetry:write` |
 | 404 | `not_found` | No such dataset, or not yours |
-| 409 | `conflict` | Narrow dataset, or the hypertable does not exist yet |
+| 409 | `conflict` | Narrow dataset, or the dataset has no storage yet |
 
 ## Next
 

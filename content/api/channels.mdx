@@ -122,12 +122,12 @@ returned so you know what to append against.
 
 <Callout type="warn">
 **Declaring a channel does not create its column.** This writes metadata; the
-hypertable is unchanged. If `ch_2` does not physically exist yet, appending to
-it returns a `400` naming the channel.
+underlying table is unchanged. If `ch_2` does not physically exist yet,
+appending to it returns a `400` naming the channel.
 
 To add a column to a live stream, re-register the stream with the full channel
-list — the Go consumer widens the table with the right type, chunk interval and
-compression settings. Doing it from this side would produce a column that is
+list — the ingest pipeline widens the table with the right type, partitioning
+and compression settings. Doing it from this side would produce a column that is
 subtly wrong forever.
 
 In practice: declare all your channels at

@@ -106,9 +106,8 @@ These are real and worth knowing before you debug them yourself.
 ## When not to use it
 
 The SDK speaks the per-point gRPC path. It does not implement the columnar
-`TelemetryFrame` format that the [NATS pipeline](/ingestion/nats-jetstream) uses,
-so for genuinely high-rate first-party production you want a producer built
-against the frame format directly — `cmd/loadgen` in `xpectra-consumer` is the
-reference implementation.
+`TelemetryFrame` format the high-rate pipeline uses, so for genuinely high-rate
+first-party production you want a producer built against the frame format
+directly. Talk to us if you need one.
 
 For everything up to a few kHz, the SDK is the right tool.
