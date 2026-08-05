@@ -1,0 +1,226 @@
+---
+title: Webhooks
+description: Register, rotate and inspect the endpoints XpectraFlow delivers commands to.
+---
+
+A webhook endpoint is where we POST commands. It is the only outbound surface
+this product has — see [how command delivery works](/commands) for what travels
+over it and why.
+
+Both scopes here are **owner-only**: only a workspace owner can create an API
+key carrying `webhooks:write`. It decides where command traffic goes, which
+changes the organization's security posture rather than its data.
+
+## Create an endpoint
+
+<Endpoint method="POST" path="/api/webhooks/create" scope="webhooks:write" />
+
+<TypeTable
+  type={{
+    label: { type: "string", description: "1–120 characters. For you; never sent anywhere.", required: true },
+    url: { type: "string", description: "An absolute https:// URL.", required: true },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/webhooks/create \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "ground-station-1", "url": "https://ops.example.com/xpectra-hook"}'
+```
+
+```json
+{
+  "id": "6b0d2f18-9c74-4e31-8a05-3f7c1e9b2d46",
+  "label": "ground-station-1",
+  "url": "https://ops.example.com/xpectra-hook",
+  "disabledAt": null,
+  "disabledReason": null,
+  "rotatingUntil": null,
+  "createdAt": "2026-07-31T12:00:00.000Z",
+  "updatedAt": "2026-07-31T12:00:00.000Z",
+  "secret": "whsec_4f1a…c92e"
+}
+```
+
+<Callout type="warn">
+`secret` is returned **once**. No endpoint returns it again — if you lose it,
+[rotate](#rotate-the-secret).
+
+It is the key for the HMAC on every delivery. Read it from the environment in
+your receiver; never commit it.
+</Callout>
+
+### What the URL has to satisfy
+
+Checked before anything is written, and again immediately before **every**
+delivery:
+
+| Rule | Why |
+|---|---|
+| `https://` only | Commands in plaintext are not commands you should act on |
+| No credentials in the URL | They would land in our delivery log and in echoed errors |
+| No fragment | It is never sent to a server anyway |
+| Ports below 1024 must be 443 | A privileged port is almost always an internal service |
+| Must not resolve to a private, loopback, link-local or CGNAT address | See below |
+| Redirects are not followed | A `302` moves the request somewhere that never passed these checks |
+
+<Callout type="info">
+The address check runs at **delivery time**, not only at registration.
+
+A hostname that resolves publicly today can resolve to `169.254.169.254` — the
+cloud metadata endpoint — tomorrow. That is DNS rebinding, and validating only
+at registration does nothing against it. Every address a hostname answers with
+is checked, not just the first.
+</Callout>
+
+A rejection names what it found:
+
+```json
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "ops.internal resolves to a private or reserved address (10.0.4.17), which we will not send to.",
+    "details": [{ "field": "url", "message": "Webhook endpoints must be publicly reachable." }],
+    "request_id": "31592257-…"
+  }
+}
+```
+
+## List endpoints
+
+<Endpoint method="GET" path="/api/webhooks/list" scope="webhooks:read" />
+
+```bash
+curl -s https://app.xpectraflow.com/api/webhooks/list \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+Includes disabled endpoints — one that auto-disabled overnight is exactly what
+you came here to find. Secrets are never in this response.
+
+`rotatingUntil` is non-null while an old secret is still being accepted, so a
+rotation in progress is visible.
+
+## Rotate the secret
+
+<Endpoint method="POST" path="/api/webhooks/rotate" scope="webhooks:write" />
+
+<TypeTable
+  type={{
+    id: { type: "string", required: true },
+    overlapSeconds: {
+      type: "number",
+      description: "0 to 604800. How long the old secret keeps signing alongside the new one.",
+      default: "86400",
+    },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/webhooks/rotate \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "6b0d2f18-…", "overlapSeconds": 86400}'
+```
+
+During the overlap every delivery carries **two** `v1=` values in
+`X-Xpectra-Signature`, one per live secret:
+
+```
+X-Xpectra-Signature: v1=6c1f…9ab2,v1=e30a…41d7
+```
+
+A receiver must accept if **any** of them verifies. That is what turns rotation
+into something you can do during a campaign rather than during a maintenance
+window: deploy the new secret when it suits you, and nothing drops meanwhile.
+
+<Callout type="warn">
+`overlapSeconds: 0` is an immediate cutover. Correct only if you can redeploy
+the receiver in the same breath; otherwise every delivery fails verification
+until you do.
+</Callout>
+
+Chaining two rotations inside one window drops the oldest secret — three
+simultaneously valid secrets is not a rotation.
+
+## Delete an endpoint
+
+<Endpoint method="POST" path="/api/webhooks/delete" scope="webhooks:write" />
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/webhooks/delete \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "6b0d2f18-…"}'
+```
+
+Deliveries stop immediately.
+
+<Callout type="info">
+This is the only `delete` on the public API. It is not an exception to the rule
+that nothing here destroys data — it removes a delivery target, and being unable
+to stop deliveries over the API would make the feature less safe, not more.
+
+The delivery history survives: each attempt row snapshots the URL it was sent
+to, so what happened remains answerable after the endpoint is gone. That is
+precisely the history someone wants after an incident involving it.
+</Callout>
+
+## Inspect deliveries
+
+<Endpoint method="GET" path="/api/webhooks/deliveries" scope="webhooks:read" />
+
+<TypeTable
+  type={{
+    commandId: { type: "string", description: "Attempts for one command." },
+    endpointId: { type: "string", description: "Attempts for one endpoint." },
+    limit: { type: "number", description: "Up to 500.", default: "200" },
+  }}
+/>
+
+```bash
+curl -s "https://app.xpectraflow.com/api/webhooks/deliveries?commandId=$COMMAND_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+```json
+[
+  {
+    "id": "c8f0…",
+    "commandId": "7e1b90c4-…",
+    "endpointId": "6b0d2f18-…",
+    "endpointUrl": "https://ops.example.com/xpectra-hook",
+    "eventType": "command.dispatched",
+    "attempt": 2,
+    "statusCode": 200,
+    "response": "",
+    "error": null,
+    "durationMs": 148,
+    "attemptedAt": "2026-07-31T12:00:05.412Z"
+  }
+]
+```
+
+One row per **attempt**, newest first — a command that took four tries appears
+four times. This is the answer to "why did my system never receive that
+command"; [the lifecycle page](/commands/lifecycle#diagnosing-a-command-that-never-arrived)
+walks through reading it.
+
+## Auto-disable
+
+An endpoint whose last twenty attempts all failed is disabled automatically and
+the organization's owners are notified. `disabledReason` says so.
+
+Re-enable it by deleting and re-registering, which also gives you a fresh
+secret. That is deliberately not a one-click action: an endpoint that failed
+twenty times running has been observed broken, and one successful delivery is
+not evidence it is fixed.
+
+## Errors
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | Bad URL — scheme, credentials, fragment, port, or a private address |
+| 403 | `insufficient_scope` | Key lacks `webhooks:read` or `webhooks:write` |
+| 404 | `not_found` | No such endpoint, or it belongs to another organization |

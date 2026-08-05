@@ -1,0 +1,163 @@
+---
+title: Arming and the kill switch
+description: Two interlocks stand between a logged command and your vehicle. Both fail closed.
+---
+
+Logging a command is always safe — it writes an audit row and annotates a chart.
+Dispatching one causes an HTTPS POST to a system that may act on it, so two
+things must be true first.
+
+| Interlock | Scope | Default |
+|---|---|---|
+| `XPECTRA_COMMAND_WEBHOOKS_ENABLED` | The whole deployment | **off** |
+| Dataset arming | One dataset, with a TTL | **not armed** |
+
+Both fail closed. A deployment that has not thought about command delivery does
+not do it.
+
+## The kill switch
+
+An environment variable on the XpectraFlow deployment. With it off:
+
+- `POST /api/commands/dispatch` returns `409` and nothing is queued
+- the dispatcher does not deliver what is already queued
+
+It is read on **every dispatch**, not once at startup. Turning it off stops new
+dispatches immediately, with no restart. A kill switch that needs a rolling
+deploy to take effect is the wrong latency for the situation a kill switch
+exists for.
+
+<Callout type="warn">
+Turning it off does not recall commands already handed to the queue. To stop
+those, restart the dispatcher as well. If a vehicle is doing something
+unexpected, stop the vehicle — the fastest control here is still your own
+receiver.
+</Callout>
+
+Self-hosting? It is `XPECTRA_COMMAND_WEBHOOKS_ENABLED` on both `xpectra-web` and
+`xpectra-commanddispatcher`, and both must agree.
+
+## Arming a dataset
+
+<Endpoint method="POST" path="/api/datasets/arm" scope="commands:write" />
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", required: true },
+    datasetId: { type: "string", required: true },
+    ttlSeconds: {
+      type: "number",
+      description: "60 to 3600. How long this dataset accepts dispatches.",
+      required: true,
+    },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/datasets/arm \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "ttlSeconds": 900
+  }'
+```
+
+```json
+{
+  "datasetId": "3d81f0a2-…",
+  "armed": true,
+  "armedAt": "2026-07-31T09:14:02.310Z",
+  "expiresAt": "2026-07-31T09:29:02.310Z"
+}
+```
+
+### Why there is a ceiling
+
+An hour, maximum. That is deliberate friction: an interlock you can switch on
+and forget is one that is always on by the second week, and then it is not an
+interlock.
+
+Re-arm when the window lapses. It puts a person back in the loop at a
+predictable interval, during a sortie, which is when you want them there.
+
+### Why it is a table, not a flag
+
+Every arming is a row: who armed it, when, for how long, and whether it was
+revoked early. Re-arming writes a new row rather than extending the old one.
+
+A review after a bad day asks *"was this dataset armed at 14:32, and who armed
+it"*. A mutable boolean answers neither.
+
+## Checking
+
+<Endpoint method="GET" path="/api/datasets/arming" scope="commands:read" />
+
+```bash
+curl -s "https://app.xpectraflow.com/api/datasets/arming?experimentId=$EXPERIMENT_ID&datasetId=$DATASET_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+```json
+{
+  "datasetId": "3d81f0a2-…",
+  "armed": true,
+  "armedAt": "2026-07-31T09:14:02.310Z",
+  "expiresAt": "2026-07-31T09:29:02.310Z",
+  "secondsRemaining": 612
+}
+```
+
+`secondsRemaining` exists so a ground station can show a countdown and re-arm
+before the window closes — rather than discovering it lapsed by having a
+dispatch refused mid-sortie.
+
+## Disarming
+
+<Endpoint method="POST" path="/api/datasets/disarm" scope="commands:write" />
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/datasets/disarm \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "reason": "Sortie complete"
+  }'
+```
+
+Revokes **every** live arming for the dataset, not just the most recent — two
+overlapping arms would otherwise leave it armed after an explicit disarm, and
+this is the one direction that must never fail quietly.
+
+Disarming something already disarmed succeeds. You asked for a state and the
+state holds; erroring would make the safe reflex — hit disarm, then check — look
+like a fault.
+
+<Callout type="info">
+Disarming stops new **dispatches**. Commands already queued are already on their
+way. The distinction matters during an abort: disarm prevents anything further
+being sent, and your receiver is what decides whether to act on something
+already delivered — which is why the payload carries `arming.expiresAt`, so you
+can drop a command whose window has closed.
+</Callout>
+
+## What a refusal looks like
+
+```json
+{
+  "error": {
+    "code": "conflict",
+    "message": "This dataset is not armed for command delivery. Arm it first with POST /api/datasets/arm.",
+    "details": [],
+    "request_id": "31592257-…"
+  }
+}
+```
+
+**The command stays `logged`.** It is not marked failed, because nothing was
+attempted — and the audit row should say what happened, which is nothing.
+
+Arm the dataset and dispatch again; the same command id works.

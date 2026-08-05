@@ -1,0 +1,137 @@
+---
+title: HTTP append
+description: Send batches of rows with curl. Good to a few hundred points a second.
+---
+
+The `curl`-driveable way in. Good for backfills, slow sensors, reprocessing
+jobs, and anything a person triggers.
+
+Requires a dataset that already has storage — [register a
+stream](/ingestion/register-a-stream) first. Full field reference on
+[the datasets page](/api/datasets#append-rows).
+
+## A batch
+
+<Endpoint method="POST" path="/api/datasets/append" scope="telemetry:write" />
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/datasets/append \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "channels": ["thrust", "chamber_pressure"],
+    "rows": [
+      { "time": "2026-07-31T12:00:00.000Z", "values": [1.50, 214.7] },
+      { "time": "2026-07-31T12:00:00.010Z", "values": [1.52, 215.1] },
+      { "time": "2026-07-31T12:00:00.020Z", "values": [1.49, null] }
+    ]
+  }'
+```
+
+```json
+{ "inserted": 3, "duplicates": 0, "rowCount": 1204998 }
+```
+
+Columnar, not row-objects: at fifty channels, repeating key names on every row
+is roughly ten times the payload for no added clarity.
+
+- `channels` accepts either the `ch_N` column or the channel's name.
+- `values` must be exactly as long as `channels`. `null` writes SQL NULL — a
+  gap in one channel is not a gap in the row.
+- `time` is RFC 3339 or epoch milliseconds.
+- Limits: 4096 channels, 5000 rows per request.
+
+## Retrying is free
+
+The storage primary key is `(time, dataset_id)`, so a replayed batch
+re-inserts nothing:
+
+```json
+{ "inserted": 0, "duplicates": 3, "rowCount": 1204998 }
+```
+
+That primary key **is** the idempotency mechanism. There is deliberately no
+`Idempotency-Key` header — two mechanisms for one job is how one of them comes
+to be forgotten.
+
+Both numbers are reported honestly, so a half-landed batch tells you so.
+
+## Streaming from a script
+
+```python
+import os, time, requests
+
+BASE = "https://app.xpectraflow.com"
+HEADERS = {"x-api-key": os.environ["XPECTRA_API_KEY"]}
+BATCH = 500
+
+def flush(rows):
+    if not rows:
+        return
+    r = requests.post(f"{BASE}/api/datasets/append", headers=HEADERS, json={
+        "experimentId": os.environ["XPECTRA_EXPERIMENT_ID"],
+        "datasetId": os.environ["XPECTRA_DATASET_ID"],
+        "channels": ["thrust", "chamber_pressure"],
+        "rows": rows,
+    }, timeout=30)
+    r.raise_for_status()
+    body = r.json()
+    # Worth logging. A steady stream of duplicates means your timestamps are
+    # repeating, which is silent data loss everywhere else.
+    if body["duplicates"]:
+        print(f"warning: {body['duplicates']} duplicate timestamps")
+
+buffer = []
+for sample in read_sensor():          # your loop
+    buffer.append({"time": sample.t.isoformat(), "values": [sample.thrust, sample.pressure]})
+    if len(buffer) >= BATCH:
+        flush(buffer)
+        buffer = []
+flush(buffer)
+```
+
+Batch to a few hundred rows and flush on a timer as well as a count, so a slow
+sensor does not sit unflushed for minutes.
+
+## Four things that will bite you
+
+<Accordions>
+  <Accordion title="Duplicate timestamps inside one batch are a 400">
+    Two rows at the same instant would collapse under the primary key — the
+    request would succeed and store less than you sent. Rejecting it is the
+    lesser evil.
+
+    If your sampling genuinely produces two readings in the same millisecond,
+    you need finer timestamps.
+  </Accordion>
+
+  <Accordion title="The column must already exist">
+    Append never alters the table. An unresolvable channel is a `400` naming the
+    field. Declare every channel at registration.
+  </Accordion>
+
+  <Accordion title="Narrow datasets are refused with a 409">
+    MAVLink datasets are narrow. Their primary key includes a frame sequence
+    only the producing agent can assign.
+  </Accordion>
+
+  <Accordion title="A 409 about storage means the table does not exist yet">
+    You created the dataset with `datasets/create` rather than
+    `streams/register`, and nothing has provisioned the table.
+
+    ```
+    This dataset has no storage yet. Register a stream or upload a file before appending.
+    ```
+  </Accordion>
+</Accordions>
+
+## When to stop using this
+
+When you are flushing more than a few times a second. Each request is a round
+trip, a transaction, and a timestamp per row; the columnar frame formats send
+one base timestamp and a sample period for a whole frame.
+
+Moving to [gRPC](/ingestion/grpc-streaming) does not change the data model — the
+same dataset, the same `ch_N` columns.

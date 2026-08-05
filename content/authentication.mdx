@@ -1,198 +1,172 @@
 ---
 title: Authentication
-description: Exchange a client id and secret for a short-lived token, and use the same token on HTTP and gRPC.
+description: Create an API key in the console, send it as x-api-key, and scope it to what it actually needs.
 ---
 
-XpectraFlow uses the OAuth2 **client credentials** grant. You hold a long-lived
-`client_id` and `client_secret`; you exchange them for an access token that
-expires in an hour; the token is what travels on every request.
+XpectraFlow has one credential: a static API key that you create in the console
+and send as a header. There is no token exchange, no refresh, no expiry dance.
+The same key authenticates an HTTP call and a gRPC stream.
 
-The token is signed, not looked up. That is what lets the same token authenticate
-an HTTP call and a gRPC stream, and why services can verify it without asking us.
+The tradeoff is deliberate. A key is a long-lived secret, so it does not expire
+on its own and a leak lasts until somebody revokes it. What makes that
+manageable is the other two properties: a key carries **scopes**, which are
+enforced on every request, and it carries an **expiry date**, which you set when
+you create it.
 
-## 1. Create a client
+## 1. Create a key
 
-Clients are created out-of-band — a credential system has to start somewhere, and
-that somewhere is always a human running something.
+In the console: **Settings → API Keys → Generate**. You choose three things.
 
-```bash
-npx tsx scripts/create-oauth-client.ts <org-slug> "Flight Ops" telemetry:write events:write
-```
-
-It prints the pair once:
-
-```
-  client_id      xpc_80b093c79de421bd9a25a8cb657f0077
-  client_secret  e014ae3cfc91f6a54ec41545f580d45a…
-  scopes         telemetry:write events:write
-```
+| | |
+|---|---|
+| **Name** | What it is for. One key per integration, so revoking one is surgical. |
+| **Expires** | 30 days, 90 days, 1 year, a custom date, or never. Default is 90 days. |
+| **Access** | Either preset (read only / read & write), or tick individual scopes. |
 
 <Callout type="warn">
-The secret is stored only as a SHA-256 digest. It is shown once and cannot be
-recovered — losing it means creating a new client.
+The key is shown **once**, on the screen that creates it. Only a SHA-256 digest
+is stored, so it cannot be recovered — losing it means creating a new key.
 </Callout>
 
-Omit the scopes to get everything except credential management.
+Keys look like `sk_xp_` followed by 64 hex characters. The console shows only
+the first and last few afterwards, so you can tell two keys apart in the table
+without the table being a place to read secrets from.
 
-## 2. Get a token
-
-```bash
-curl -s -X POST https://app.xpectraflow.com/api/v1/auth/token \
-  -d grant_type=client_credentials \
-  -d client_id=xpc_80b093c79de421bd9a25a8cb657f0077 \
-  -d client_secret=e014ae3cfc91f6a54ec41545f580d45a
-```
-
-```json
-{
-  "access_token": "eyJhbGciOiJFZERTQSIsImtpZCI6…",
-  "token_type": "Bearer",
-  "expires_in": 3600,
-  "scope": "telemetry:write telemetry:read events:write events:read"
-}
-```
-
-Form-encoded, per RFC 6749 — so any OAuth2 client library already speaks it. HTTP
-Basic works too, if your library prefers that:
+## 2. Use it
 
 ```bash
-curl -s -X POST https://app.xpectraflow.com/api/v1/auth/token \
-  -u "$CLIENT_ID:$CLIENT_SECRET" \
-  -d grant_type=client_credentials
+curl -s https://app.xpectraflow.com/api/experiments/list \
+  -H "x-api-key: $XPECTRA_API_KEY"
 ```
 
-Note the returned `scope` is wider than what was asked for. `:write` implies
-`:read` on the same resource — a writer that cannot read back what it wrote is a
-support ticket, not a security boundary.
+The same header works as gRPC metadata:
 
-### Asking for less
+```python
+metadata = [("x-api-key", api_key)]
+stub.Submit(request, metadata=metadata)
+```
 
-A client's scopes are a **ceiling**, not a grant. Request a subset for a
-particular token:
+The Python SDK reads `XPECTRA_API_KEY` from the environment, so in most cases
+you never write the header yourself:
 
 ```bash
-curl -s -X POST https://app.xpectraflow.com/api/v1/auth/token \
-  -d grant_type=client_credentials \
-  -d client_id=$CLIENT_ID -d client_secret=$CLIENT_SECRET \
-  -d 'scope=telemetry:write'
+export XPECTRA_API_KEY=sk_xp_…
 ```
 
-Asking for more than the ceiling is an error, not a silent downgrade:
+```python
+from xpectra import Client
+
+client = Client()          # picks up XPECTRA_API_KEY
+print(client.experiments.list())
+```
+
+## Scopes
+
+`<resource>:<action>`. No wildcards — a wildcard quietly grants a resource added
+two years later.
+
+| Scope | Grants | Required by |
+|---|---|---|
+| `experiments:read` | List and read experiments | `/api/experiments/{list,get}` |
+| `experiments:write` | Create and update experiments | `/api/experiments/{create,update}` |
+| `datasets:read` | List datasets and their channels | `/api/datasets/{list,get,channels}` |
+| `datasets:write` | Create and update datasets and channels; register streams | `/api/datasets/{create,update}`, `/api/datasets/channels/{create,update}`, `/api/streams/register` |
+| `telemetry:read` | Query telemetry and signals | gRPC `Query` |
+| `telemetry:write` | Ingest telemetry points, frames and batches | `/api/datasets/append`, gRPC `Submit`, `StreamSubmit` |
+| `events:read` | Read dataset events | `/api/datasets/events` (GET) |
+| `events:write` | Append dataset events | `/api/datasets/events` |
+| `commands:read` | Read the command log and arming state | `/api/commands/list`, `/api/datasets/arming` |
+| `commands:write` | Log and dispatch commands; arm datasets | `/api/commands/{create,dispatch}`, `/api/datasets/{arm,disarm}` |
+| `keys:read` | List this organization's API keys | `/api/keys/list` |
+| `keys:write` | **Revoke** API keys — not create them | `/api/keys/revoke` |
+| `webhooks:read` | List webhook endpoints and delivery attempts | `/api/webhooks/{list,deliveries}` |
+| `webhooks:write` | Register, rotate and remove webhook endpoints | `/api/webhooks/{create,rotate,delete}` |
+
+Scopes with no endpoint in the third column are part of the vocabulary but
+nothing requires them yet. Granting one today does nothing; it will start
+meaning something when the matching endpoint ships.
+
+`:write` implies `:read` on the same resource. A writer that cannot read back
+what it wrote is a support ticket, not a security boundary — so a key granted
+`telemetry:write` also holds `telemetry:read`, and the console shows it that way
+when you tick the box.
+
+### Owner-only scopes
+
+`keys:write` and `webhooks:write` can only be granted by a workspace **owner**.
+Both change the organization's security posture rather than its data — one
+revokes credentials, the other decides where command traffic is delivered — and
+a key should never reach further than the person who minted it.
+
+They are also absent from the **Read only** and **Read & write** presets. Nobody
+ticking "Read & write" expects to hand out the ability to revoke other
+credentials, so those scopes have to be chosen deliberately, one at a time.
+
+<Callout type="warn">
+`keys:write` is the one scope whose name overstates what it does. It revokes
+keys. It does **not** grant creating them, and no scope does — see
+[API keys](/api/api-keys) for why a key that can mint keys would defeat the only
+lever we have against a leak.
+</Callout>
+
+Grant the narrowest set that works. A telemetry producer wants
+`telemetry:write`, not everything.
+
+### When a key lacks a scope
 
 ```json
 {
   "error": {
-    "code": "invalid_scope",
-    "message": "This client is not permitted the scope: clients:write.",
+    "code": "insufficient_scope",
+    "message": "This API key lacks the datasets:write scope.",
     "details": [],
     "request_id": "31592257-1558-48ed-8328-a5086ccfa4ed"
   }
 }
 ```
 
-A caller that believes it holds `telemetry:write` and quietly does not will fail
-later, somewhere less obvious than here.
+`403`, and the message names the scope that was missing. Over gRPC the same
+condition is `PERMISSION_DENIED` with the same text.
 
-## 3. Use it
-
-```bash
-curl -s https://app.xpectraflow.com/api/v1/experiments \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
-
-The same header works as gRPC metadata:
-
-```python
-metadata = [("authorization", f"Bearer {access_token}")]
-stub.Submit(request, metadata=metadata)
-```
-
-## Scopes
-
-`<resource>:<action>`. No wildcards.
-
-| Scope | Grants |
-|---|---|
-| `experiments:read` | List and read experiments |
-| `experiments:write` | Create, update and delete experiments |
-| `datasets:read` | List datasets and their channels |
-| `datasets:write` | Create, update and delete datasets; register streams |
-| `telemetry:read` | Query telemetry and signals |
-| `telemetry:write` | Ingest telemetry points and frames |
-| `events:read` | Read dataset events |
-| `events:write` | Append dataset events |
-| `commands:read` | Read the command log |
-| `commands:write` | Log commands and acknowledge delivered ones |
-| `webhooks:read` | List webhook endpoints and their deliveries |
-| `webhooks:write` | Register, update and remove webhook endpoints |
-| `clients:read` | List OAuth clients |
-| `clients:write` | Create and revoke OAuth clients |
-
-Grant the narrowest set that works. A telemetry producer wants
-`telemetry:write`, not everything.
-
-## Verifying tokens yourself
-
-The public keys are published, so anything in your own infrastructure can verify
-a token without calling us:
-
-```bash
-curl -s https://app.xpectraflow.com/.well-known/jwks.json
-```
-
-```json
-{
-  "keys": [
-    {
-      "crv": "Ed25519",
-      "x": "F84b5fGOdcDZBdVZ-gI5U67LtZEzWEkcOuZzPqlPGNA",
-      "kty": "OKP",
-      "kid": "hgNYQZCVkXcGGlr-",
-      "use": "sig",
-      "alg": "EdDSA"
-    }
-  ]
-}
-```
-
-Tokens are **EdDSA (Ed25519)** only. Reject any other `alg` — a verifier that
-trusts the header's algorithm can be handed a token re-signed with the public key
-as an HMAC secret, and that key is right there in the document above.
-
-Claims:
-
-| Claim | Meaning |
-|---|---|
-| `iss` | `https://app.xpectraflow.com` |
-| `aud` | `xpectra-api` |
-| `sub` | the `client_id` |
-| `org` | organization the token acts for |
-| `scope` | space-delimited scopes |
-| `exp` / `iat` | expiry and issue time |
-| `jti` | unique token id |
-
-## Rotation and revocation
-
-Keys rotate without breaking tokens in flight: during a rotation the JWKS carries
-both the new and previous public key, so tokens signed before the change keep
-verifying until they expire. If you cache the key set, refetch when you meet a
-`kid` you do not recognise.
-
-<Callout type="warn">
-**Revocation is eventual.** Revoking a client stops it minting new tokens
-immediately, but tokens already issued stay valid until they expire — up to one
-hour. That is the cost of tokens that can be verified without a database lookup.
-Treat a leaked token as live for an hour.
+<Callout type="info">
+This is the failure mode worth designing for. A key created with the "Read only"
+preset can list experiments and datasets, and will be refused when it tries to
+register a stream or append an event. If an integration starts failing after a
+key change, the scope named in the message is the whole diagnosis.
 </Callout>
 
-## API keys (deprecated)
+## Expiry and revocation
 
-Older integrations use a static `sk_xp_` key:
+An expired key returns `401` with `This API key has expired.` Nothing warns you
+in advance, so set the expiry to something you will notice — a key that expires
+mid-flight is worse than one that expires on a Tuesday morning.
 
-```bash
-curl -s https://app.xpectraflow.com/api/v1/experiments -H "x-api-key: sk_xp_…"
-```
+Revoking is immediate in the console (**Revoke** on the key's row) and takes
+effect on the HTTP API on the next request. It can also be scripted — see
+[API keys](/api/api-keys) for `POST /api/keys/revoke` and the fleet-rotation
+sequence.
 
-Still works, and will keep working. But it never expires, cannot be scoped
-narrowly in practice, and a leak is permanent until somebody notices. New
-integrations should use client credentials.
+<Callout type="warn">
+**gRPC lags by up to 5 minutes.** The ingest service caches key validity so a
+20 kHz stream is not doing an HTTP round trip per connection. A revoked key can
+keep streaming for the length of that cache. If you are revoking a key because
+it leaked, stop the stream as well as revoking the key.
+</Callout>
+
+The same cache applies in the other direction: widening a key's scopes takes up
+to 5 minutes to be visible on the gRPC path.
+
+## Keeping a key safe
+
+- **Never commit one.** Read it from the environment. A key in a public
+  repository is live from the moment it is pushed, and history keeps it live
+  after the commit that removes it.
+- **One key per integration.** Shared keys mean revoking the leaked one takes
+  down four things you did not intend to touch.
+- **Set an expiry.** It is the only thing that limits the blast radius of a leak
+  nobody noticed.
+- **Scope it down.** A key that can only read cannot be used to write.
+
+If you suspect a key has leaked, revoke it first and investigate afterwards. The
+key's `last_used_at` survives revocation, so the record of what it was doing is
+still there once the credential is dead.

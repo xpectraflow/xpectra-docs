@@ -1,0 +1,172 @@
+---
+title: Experiments
+description: Create, read and update experiments — the top-level container everything else hangs off.
+---
+
+An experiment is the container. Datasets belong to it, channels belong to them,
+and every id you will use elsewhere starts from here.
+
+Everything on this page needs `experiments:read`, or `experiments:write` for the
+two that change something. `:write` implies `:read`, so a key that can create an
+experiment can also list them.
+
+<Callout type="info">
+There is no delete endpoint, here or anywhere else in this API. Deleting an
+experiment cascades to its datasets and their telemetry, and nothing an API key
+holds should be able to do that — a key is a static string sitting in a config
+file. Delete from the console instead: **Experiments → ⋯ → Delete**.
+</Callout>
+
+## List experiments
+
+<Endpoint method="GET" path="/api/experiments/list" scope="experiments:read" />
+
+No parameters. Returns every experiment in your organization, newest first.
+There is no pagination — the list returns everything it matches.
+
+```bash
+curl -s https://app.xpectraflow.com/api/experiments/list \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+```json
+[
+  {
+    "id": "9f2c1b44-7e30-4a11-b8d2-1f4a6c0e8b91",
+    "name": "Merlin cold-flow campaign",
+    "description": "Cold-flow series, Q3.",
+    "status": "active",
+    "sensorConfig": null,
+    "createdAt": "2026-07-14T09:02:11.482Z",
+    "updatedAt": "2026-07-28T16:41:03.117Z"
+  }
+]
+```
+
+<Callout type="info">
+The shared **Open Data** demo experiment that appears in the console is
+deliberately absent here. Handing an integrator an experiment they cannot write
+to produces a confusing bug report rather than a free sample.
+</Callout>
+
+## Get one experiment
+
+<Endpoint method="GET" path="/api/experiments/get" scope="experiments:read" />
+
+<TypeTable
+  type={{
+    id: { type: "string", description: "UUID of the experiment.", required: true },
+  }}
+/>
+
+```bash
+curl -s "https://app.xpectraflow.com/api/experiments/get?id=$EXPERIMENT_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+Returns a single object in the same shape as a list entry.
+
+A `404` means either that no such experiment exists **or** that it belongs to
+another organization. The two are deliberately indistinguishable: telling a
+caller that an id is real is the one thing worth withholding from someone
+guessing ids.
+
+## Create an experiment
+
+<Endpoint method="POST" path="/api/experiments/create" scope="experiments:write" />
+
+<TypeTable
+  type={{
+    name: {
+      type: "string",
+      description: "2–120 characters. Must be unique within your organization.",
+      required: true,
+    },
+    description: { type: "string | null", description: "Up to 2000 characters." },
+    status: {
+      type: '"draft" | "active" | "archived"',
+      description: "Lifecycle state.",
+      default: '"draft"',
+    },
+    sensors: {
+      type: "Array<{ sensorId: string; channelIndices: number[] | null }>",
+      description: "Optional sensor membership, if you are wiring up a sensor library.",
+    },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/experiments/create \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Merlin cold-flow campaign",
+    "description": "Cold-flow series, Q3.",
+    "status": "active"
+  }'
+```
+
+```json
+{
+  "id": "9f2c1b44-7e30-4a11-b8d2-1f4a6c0e8b91",
+  "name": "Merlin cold-flow campaign",
+  "description": "Cold-flow series, Q3.",
+  "status": "active",
+  "sensorConfig": null,
+  "createdAt": "2026-07-31T12:00:00.000Z",
+  "updatedAt": "2026-07-31T12:00:00.000Z"
+}
+```
+
+Keep the `id`. It is the first argument to almost everything else.
+
+A duplicate name returns `409 conflict`. Uniqueness is checked per organization
+with a read-then-write, so two simultaneous creates with the same name can both
+succeed — the result is two experiments sharing a name, which is untidy rather
+than broken.
+
+## Update an experiment
+
+<Endpoint method="POST" path="/api/experiments/update" scope="experiments:write" />
+
+<Callout type="warn">
+This is a **full replacement**, not a patch. `name` and `status` are required,
+and omitting `description` clears it. Sending `{"id": "…", "status": "archived"}`
+alone is a validation error, not a partial update — which is the right failure,
+because the alternative is silently erasing a description somebody wrote.
+</Callout>
+
+Same fields as create, plus `id`.
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/experiments/update \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "'"$EXPERIMENT_ID"'",
+    "name": "Merlin cold-flow campaign",
+    "description": "Cold-flow series, Q3. Concluded.",
+    "status": "archived"
+  }'
+```
+
+Returns the updated experiment.
+
+## Errors
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | Missing `id`, a name outside 2–120 characters, an unknown `status` |
+| 403 | `insufficient_scope` | Key lacks `experiments:read` or `experiments:write` |
+| 404 | `not_found` | No such experiment, or it belongs to another organization |
+| 409 | `conflict` | An experiment with that name already exists |
+
+Every error carries the standard envelope and an `X-Request-Id` — see
+[API conventions](/conventions).
+
+## Next
+
+<Cards>
+  <Card title="Datasets" href="/api/datasets" description="The runs inside an experiment, and how to add data to one." />
+  <Card title="Register a stream" href="/ingestion/register-a-stream" description="Create a dataset and its channels in one call, ready for live telemetry." />
+</Cards>

@@ -60,7 +60,12 @@ registering a live stream. Creating one returns an **ingest token exactly once**
 — it is stored only as a bcrypt hash, so if you lose it you create a new dataset
 rather than recovering the old token.
 
-Each dataset gets its own TimescaleDB hypertable named `hyper-<dataset-id>`.
+That token is not an alternative to your API key. It is issued by the platform,
+scoped to this one dataset, and exists so a producer can be handed the narrowest
+possible credential for a single run. The key you create in the console is the
+one you authenticate with; see [Authentication](/authentication).
+
+Each dataset gets its own dedicated time-series table, named `hyper-<dataset-id>`.
 
 ### Wide and narrow
 
@@ -81,8 +86,8 @@ cell that did not arrive, which is why the distinction exists at all.
 One measured signal, with a name and a unit.
 
 Internally channels map to columns `ch_0`, `ch_1`, … in declared order. You will
-see those indices in the gRPC and NATS paths, and in the `channelIndices` a
-stream registration hands back.
+see those indices in the gRPC path, and in the `channelIndices` a stream
+registration hands back.
 
 <Callout type="warn">
 The gRPC ingest path addresses channels by **index**, as a string — `"0"`, not

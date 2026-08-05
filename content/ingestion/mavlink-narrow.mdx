@@ -1,0 +1,117 @@
+---
+title: MAVLink and narrow storage
+description: Drone telemetry, why it is stored differently, and why the agent never transmits.
+---
+
+MAVLink does not fit the wide model. A vehicle sends attitude at 50 Hz, GPS at
+5 Hz, and a status string only when something has something to say — there is no
+shared frame and no common clock, so "one row per instant with a column per
+channel" would be mostly nulls.
+
+Narrow storage is one row per measurement.
+
+## Registering
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/streams/register \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetName": "sortie-2026-07-31-sysid1",
+    "storageShape": "narrow",
+    "codec": "mavlink",
+    "dialect": "ardupilotmega",
+    "format": "mavlink-raw-v1"
+  }'
+```
+
+No `channels`. Which messages a vehicle sends is not knowable before it starts
+talking, so the signal list is derived from the data as it arrives.
+
+**One dataset per (sortie × system id).** A three-vehicle flight is three
+datasets, which is what makes each one's timeline independently meaningful.
+
+## Signal names
+
+Channels are addressed by name, not by `ch_N` — for this shape the signal *is*
+the address:
+
+```
+mavlink.ATTITUDE.roll
+mavlink.GLOBAL_POSITION_INT.lat
+mavlink.STATUSTEXT.text
+mavlink.ATTITUDE_QUATERNION.q[0]      # array elements are indexed
+mavlink.UNKNOWN_42.raw                # undecodable message ids are kept, not dropped
+```
+
+That last one matters: a message the pinned dialect does not know is stored raw
+rather than discarded, so re-decoding it later is possible.
+
+To list what a flight actually contains, call `GET /api/datasets/channels` with
+`experimentId` — that form materialises the signal list from the data before
+answering, so a flight nobody has opened in the console yet does not come back
+empty.
+
+## Decoding happens server-side
+
+The agent near the vehicle frames MAVLink structurally and forwards **bytes**.
+It holds no decode dictionary.
+
+The consumer holds the pinned dialect and the CRC_EXTRA table, and can be
+updated without touching anything in the field — which is the point, because
+"the thing on the aircraft needs a new dialect" is a much worse sentence than
+"the server does".
+
+## Time is not simple here
+
+A narrow dataset's raw `time` column deliberately mixes two scales. Samples
+taken before the vehicle had a GPS fix sit near the Unix epoch, because
+inventing a UTC for them would have been a lie.
+
+Alignment is applied at read time. This is why:
+
+- reading `MIN(time)` off the raw column would report 1970
+- `POST /api/datasets/events` with absolute timestamps resolves the anchor
+  through the same alignment the charts use, so annotations land correctly
+
+`time_source`, `boot_us` and `boot_session` on each row record which clock a
+measurement came from.
+
+## LINK_LOSS
+
+The one annotation that cannot be reconstructed afterwards.
+
+"We do not know what happened here" and "nothing happened here" are identical
+downstream — both are absent rows — and a chart that interpolates across the
+first is drawing an altitude nobody measured. Only the agent, at the time, can
+tell them apart, so it records the distinction with
+[an event](/api/events).
+
+An agent-to-server network outage is **not** a link loss. Frames spooled through
+a drop arrive late but complete, so nothing is unknown and the timeline stays
+unmarked.
+
+## The agent never transmits
+
+<Callout type="warn">
+The MAVLink agent binds a socket it never writes to. It sends no commands, and
+specifically never `MAV_CMD_SET_MESSAGE_INTERVAL`, which would raise message
+rates on a bandwidth-limited radio an operator is relying on to fly an aircraft.
+
+This is not only a safety property. The moment a system can command a vehicle it
+inherits a regulatory surface, and observability is a much easier thing to put
+on an aircraft than a control path.
+
+If you need commands to reach a vehicle, [that is your system's
+job](/commands) — we hand it to you over a webhook and stay off the wire.
+</Callout>
+
+## Appending is not available
+
+Narrow datasets refuse `POST /api/datasets/append` with a `409`. The narrow
+primary key includes `frame_seq`, which exists so a redelivered frame collapses
+onto the row it already wrote; an HTTP appender has none, and inventing one
+destroys exactly that property.
+
+Ingest narrow data through the agent.

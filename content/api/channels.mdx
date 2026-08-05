@@ -1,0 +1,185 @@
+---
+title: Channels
+description: The channel list for a dataset, and why hypertableColName is the field that matters.
+---
+
+A channel is one measured quantity in a dataset — thrust, chamber pressure,
+battery voltage. It carries a name and a unit for humans, and a column name for
+machines.
+
+## Read this first
+
+Every channel has two identifiers, and only one of them works for writing data.
+
+| Field | What it is | Use it for |
+|---|---|---|
+| `id` | A UUID for the channel row | Updating the channel's metadata |
+| `hypertableColName` | The physical column, `ch_0`, `ch_1`, … | **Reading and writing values** |
+
+<Callout type="warn">
+`hypertableColName` — not `id` — is the address of the data.
+
+`POST /api/datasets/append` takes `ch_N` (or the channel's name), and the gRPC
+ingest path matches `TelemetryPoint.channel_id` against the *index* `N` as a
+string, not the UUID. A producer that stores the UUID and sends it builds
+something that authenticates, validates, returns `200`, and writes nothing at
+all. This is the single most common integration mistake against this API.
+</Callout>
+
+## List channels
+
+<Endpoint method="GET" path="/api/datasets/channels" scope="datasets:read" />
+
+<TypeTable
+  type={{
+    datasetId: { type: "string", description: "UUID.", required: true },
+    experimentId: {
+      type: "string",
+      description:
+        "Optional but recommended — see the note below on narrow datasets.",
+    },
+  }}
+/>
+
+```bash
+curl -s "https://app.xpectraflow.com/api/datasets/channels?datasetId=$DATASET_ID&experimentId=$EXPERIMENT_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+```json
+[
+  {
+    "id": "c1a7e8b0-2f44-4d19-9c33-5b8e10f2a441",
+    "name": "thrust",
+    "unit": "kN",
+    "dataType": "float",
+    "hypertableColName": "ch_0"
+  },
+  {
+    "id": "de92f31c-88a5-4c07-bb61-0a3d7e9c1b22",
+    "name": "chamber_pressure",
+    "unit": "bar",
+    "dataType": "float",
+    "hypertableColName": "ch_1"
+  }
+]
+```
+
+<Callout type="info">
+**Pass `experimentId` if the dataset might be narrow.** A narrow dataset — any
+MAVLink stream — declares no channels at registration; its signals are
+discovered from the data as it arrives. With `experimentId` present, this
+endpoint materialises that list before answering, so a flight nobody has opened
+in the console yet returns its real signals rather than an empty array.
+
+Narrow channels are addressed by signal name (`mavlink.ATTITUDE.roll`), which is
+what appears in `hypertableColName` for that shape — there the signal *is* the
+address.
+</Callout>
+
+## Create a channel
+
+<Endpoint method="POST" path="/api/datasets/channels/create" scope="datasets:write" />
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", required: true },
+    datasetId: { type: "string", required: true },
+    name: { type: "string", description: "2–120 characters.", required: true },
+    unit: { type: "string | null", description: "Up to 40 characters." },
+    dataType: {
+      type: '"float" | "int" | "string" | "bool"',
+      default: '"float"',
+    },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/datasets/channels/create \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "name": "nozzle_temp",
+    "unit": "K",
+    "dataType": "float"
+  }'
+```
+
+```json
+{
+  "id": "7b2c9d10-4e83-4a52-8f16-c0b91d3e5a77",
+  "name": "nozzle_temp",
+  "unit": "K",
+  "dataType": "float",
+  "hypertableColName": "ch_2"
+}
+```
+
+The `ch_N` index is assigned by us — the next free one for the dataset — and
+returned so you know what to append against.
+
+<Callout type="warn">
+**Declaring a channel does not create its column.** This writes metadata; the
+underlying table is unchanged. If `ch_2` does not physically exist yet,
+appending to it returns a `400` naming the channel.
+
+To add a column to a live stream, re-register the stream with the full channel
+list — the ingest pipeline widens the table with the right type, partitioning
+and compression settings. Doing it from this side would produce a column that is
+subtly wrong forever.
+
+In practice: declare all your channels at
+[stream registration](/ingestion/register-a-stream). This endpoint is for
+correcting an omission, not for building a schema incrementally.
+</Callout>
+
+Narrow datasets are refused with `409`. Their signals are discovered, not
+declared.
+
+## Update a channel
+
+<Endpoint method="POST" path="/api/datasets/channels/update" scope="datasets:write" />
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", required: true },
+    datasetId: { type: "string", required: true },
+    id: { type: "string", description: "Channel UUID.", required: true },
+    name: { type: "string", description: "2–120 characters.", required: true },
+    unit: { type: "string | null" },
+    dataType: { type: '"float" | "int" | "string" | "bool"', required: true },
+  }}
+/>
+
+Fixes a name, a unit or a declared type. `hypertableColName` is not editable:
+it is where the data lives, and changing it would repoint the row at another
+channel's values rather than move anything.
+
+`dataType` here is the *declared* type in the snapshot, not the physical column
+type. Correcting it changes how values are labelled and rendered; it does not
+convert data already written.
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/datasets/channels/update \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "id": "'"$CHANNEL_ID"'",
+    "name": "nozzle_temp",
+    "unit": "degC",
+    "dataType": "float"
+  }'
+```
+
+## Errors
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | Missing `datasetId`, or a name outside 2–120 characters |
+| 403 | `insufficient_scope` | Key lacks `datasets:read` or `datasets:write` |
+| 404 | `not_found` | No such dataset or channel, or not yours |
+| 409 | `conflict` | Declaring a channel on a narrow dataset |

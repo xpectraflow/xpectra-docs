@@ -1,0 +1,296 @@
+---
+title: Datasets
+description: Create and read datasets, and append rows to one over HTTP.
+---
+
+A dataset is one run: a flight, a test firing, a bench session. It belongs to an
+experiment, it owns a set of channels, and its rows live in a dedicated
+time-series table named `hyper-<datasetId>`.
+
+Two things on this page are easy to conflate, so start here:
+
+| You want | Use |
+|---|---|
+| An empty dataset you will fill later | `POST /api/datasets/create` |
+| A dataset ready for live telemetry, with channels | [`POST /api/streams/register`](/ingestion/register-a-stream) |
+
+`create` makes a row and nothing else — **no storage and no channels**. Until
+one exists, appending to it fails with a `409`. `register` makes the row, the
+channel snapshot and the storage in one call, which is what you want in almost
+every case.
+
+<Callout type="info">
+There is no delete endpoint. Deleting a dataset destroys its telemetry, and a
+key pasted into a producer's config should not be able to do that. Delete from
+the console.
+</Callout>
+
+## List datasets
+
+<Endpoint method="GET" path="/api/datasets/list" scope="datasets:read" />
+
+<TypeTable
+  type={{
+    experimentId: {
+      type: "string",
+      description:
+        "Optional. Scopes the list to one experiment. Omit it to get every dataset in your organization.",
+    },
+  }}
+/>
+
+```bash
+curl -s "https://app.xpectraflow.com/api/datasets/list?experimentId=$EXPERIMENT_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+```json
+[
+  {
+    "id": "3d81f0a2-55c7-4f9e-9a1b-77c2e0d43a10",
+    "name": "sortie-2026-07-31-0914-sysid1",
+    "experimentId": "9f2c1b44-7e30-4a11-b8d2-1f4a6c0e8b91",
+    "status": "completed",
+    "rowCount": 1204998,
+    "startedAt": "2026-07-31T09:14:02.310Z",
+    "endedAt": "2026-07-31T09:41:55.002Z",
+    "timeOffsetMs": 0,
+    "codec": "mavlink",
+    "storageLocation": "timescale",
+    "meta": { "storageShape": "narrow", "dialect": "ardupilotmega" },
+    "createdAt": "2026-07-31T09:13:58.771Z"
+  }
+]
+```
+
+Three fields deserve attention:
+
+- **`status`** — `queued` → `running` → `completed` or `failed`. A live stream
+  sits at `running` until the consumer sees no frames for 30 seconds, then
+  closes it.
+- **`storageLocation`** — `timescale` means queryable now. `s3` means the run
+  has been archived to Parquet and needs restoring first. A poller checking "is
+  my data ready" wants this, not `status`.
+- **`rowCount`** — approximate. Both the ingest pipeline and the append route
+  maintain it, and neither takes a lock to do so.
+
+## Get one dataset
+
+<Endpoint method="GET" path="/api/datasets/get" scope="datasets:read" />
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", description: "UUID.", required: true },
+    datasetId: { type: "string", description: "UUID.", required: true },
+  }}
+/>
+
+Both ids are required. The dataset id alone would be enough to find the row —
+asking for the experiment as well is what makes this run the same ownership
+check the console runs, rather than a second implementation of it.
+
+```bash
+curl -s "https://app.xpectraflow.com/api/datasets/get?experimentId=$EXPERIMENT_ID&datasetId=$DATASET_ID" \
+  -H "x-api-key: $XPECTRA_API_KEY"
+```
+
+## Create a dataset
+
+<Endpoint method="POST" path="/api/datasets/create" scope="datasets:write" />
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", description: "UUID of the parent experiment.", required: true },
+    name: { type: "string", description: "2–120 characters.", required: true },
+    status: {
+      type: '"queued" | "running" | "completed" | "failed"',
+      default: '"queued"',
+    },
+    timeOffsetMs: {
+      type: "number",
+      description:
+        "Signed render-time alignment against experiment T=0. Negative means this run started earlier.",
+      default: "0",
+    },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/datasets/create \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "name": "bench-run-014"
+  }'
+```
+
+```json
+{
+  "id": "3d81f0a2-55c7-4f9e-9a1b-77c2e0d43a10",
+  "name": "bench-run-014",
+  "experimentId": "9f2c1b44-7e30-4a11-b8d2-1f4a6c0e8b91",
+  "status": "queued",
+  "rowCount": 0,
+  "startedAt": null,
+  "endedAt": null,
+  "timeOffsetMs": 0,
+  "codec": "frame",
+  "storageLocation": "timescale",
+  "meta": null,
+  "createdAt": "2026-07-31T12:00:00.000Z",
+  "hypertableName": "hyper-3d81f0a2-55c7-4f9e-9a1b-77c2e0d43a10",
+  "ingestToken": "b7f1…9ac2"
+}
+```
+
+<Callout type="warn">
+`ingestToken` is returned **once**. Only a bcrypt hash is stored and there is no
+endpoint that recovers it — the same treatment as an API key, for the same
+reason. If you lose it, create another dataset.
+</Callout>
+
+## Update a dataset
+
+<Endpoint method="POST" path="/api/datasets/update" scope="datasets:write" />
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", required: true },
+    datasetId: { type: "string", required: true },
+    name: { type: "string", description: "2–120 characters.", required: true },
+    status: { type: '"queued" | "running" | "completed" | "failed"', required: true },
+    startedAt: { type: "string | null", description: "RFC 3339. Cleared when omitted." },
+    endedAt: { type: "string | null", description: "RFC 3339. Cleared when omitted." },
+    timeOffsetMs: { type: "number", description: "Only changed when present." },
+    daqName: { type: "string | null", description: "Only changed when present." },
+  }}
+/>
+
+Like the experiment update, this replaces rather than patches: `name` and
+`status` are required, and `startedAt`/`endedAt` are cleared when omitted.
+`timeOffsetMs` and `daqName` are the exceptions and are only touched when you
+send them.
+
+## Append rows
+
+<Endpoint method="POST" path="/api/datasets/append" scope="telemetry:write" />
+
+The HTTP way to add data to a dataset that already has storage. Good for
+backfills, slow sensors, and filling in what a producer missed. It is **not** the
+high-rate path — a sustained feed belongs on
+[gRPC](/ingestion/grpc-streaming), where a columnar frame avoids re-sending a
+timestamp per row.
+
+Note the scope: `telemetry:write`, not `datasets:write`. This writes telemetry,
+not metadata, and it is the same scope gRPC ingest requires — so a producer that
+streams and backfills needs one credential rather than two.
+
+<TypeTable
+  type={{
+    experimentId: { type: "string", required: true },
+    datasetId: { type: "string", required: true },
+    channels: {
+      type: "string[]",
+      description:
+        "Column names in value order. Either the ch_N column or the channel's name — both resolve to the same column. 1–4096 entries.",
+      required: true,
+    },
+    rows: {
+      type: "Array<{ time: string | number; values: (number | null)[] }>",
+      description:
+        "1–5000 rows. time is RFC 3339 or epoch milliseconds. values must be exactly as long as channels.",
+      required: true,
+    },
+  }}
+/>
+
+```bash
+curl -s -X POST https://app.xpectraflow.com/api/datasets/append \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "experimentId": "'"$EXPERIMENT_ID"'",
+    "datasetId": "'"$DATASET_ID"'",
+    "channels": ["ch_0", "chamber_pressure"],
+    "rows": [
+      { "time": "2026-07-31T12:00:00.000Z", "values": [1.50, 214.7] },
+      { "time": "2026-07-31T12:00:00.010Z", "values": [1.52, 215.1] },
+      { "time": "2026-07-31T12:00:00.020Z", "values": [1.49, null] }
+    ]
+  }'
+```
+
+```json
+{ "inserted": 3, "duplicates": 0, "rowCount": 1204998 }
+```
+
+### Rules that will bite you
+
+<Accordions>
+  <Accordion title="Timestamps must be unique within a batch">
+    The storage primary key is `(time, dataset_id)`. Two rows at the same
+    instant would collapse into one, because a conflicting row is ignored rather
+    than written — the request would succeed and quietly store less than you
+    sent. So a duplicate inside one batch is rejected with `400` instead.
+
+    If your sampling genuinely produces two readings at the same millisecond, you
+    need finer timestamps, not two rows.
+  </Accordion>
+
+  <Accordion title="`duplicates` is not an error — it is what makes retrying safe">
+    A batch replayed after a network timeout re-inserts nothing and comes back as
+    `{"inserted": 0, "duplicates": 3}`. That primary key **is** the idempotency
+    mechanism; there is deliberately no `Idempotency-Key` header, because two
+    mechanisms for one job is how one of them comes to be forgotten.
+
+    The two numbers are reported honestly. A half-landed batch tells you so.
+  </Accordion>
+
+  <Accordion title="The column has to exist already">
+    Appending never alters the table. Adding a column belongs to the ingest
+    pipeline, which knows the partitioning, the compression settings and the type
+    map a column needs to be correct — a column created from the API side would
+    be subtly wrong forever.
+
+    An unresolvable channel comes back as a `400` naming the field:
+
+    ```json
+    "details": [{
+      "field": "channels.1",
+      "message": "No channel \"thrust_2\" on this dataset. Send the ch_N column or the channel name exactly as GET /api/datasets/channels reports it."
+    }]
+    ```
+  </Accordion>
+
+  <Accordion title="Narrow datasets are refused">
+    A narrow row's primary key includes `frame_seq`, which exists so a redelivered
+    frame collapses onto the row it already wrote. An HTTP appender has no frame
+    sequence to supply, and inventing one destroys exactly the property the
+    column was added for. MAVLink datasets are narrow; expect a `409`.
+  </Accordion>
+
+  <Accordion title="Large batches are split for you">
+    The storage engine caps a statement at 65535 bind parameters and each row costs
+    `2 + channels.length`, so 5000 rows of 50 channels would be 260 000. The
+    route chunks internally inside one transaction. You do not need to do
+    anything, but it is why a very wide batch is slower than a narrow one of the
+    same row count.
+  </Accordion>
+</Accordions>
+
+### Append errors
+
+| Status | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | Duplicate timestamps, unknown channel, `values` length mismatch, unparseable time |
+| 403 | `insufficient_scope` | Key lacks `telemetry:write` |
+| 404 | `not_found` | No such dataset, or not yours |
+| 409 | `conflict` | Narrow dataset, or the dataset has no storage yet |
+
+## Next
+
+<Cards>
+  <Card title="Channels" href="/api/channels" description="What ch_N means, and why it is the only address that works." />
+  <Card title="Events" href="/api/events" description="Annotate a run — including live, with absolute timestamps." />
+</Cards>

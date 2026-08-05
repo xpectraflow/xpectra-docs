@@ -1,0 +1,142 @@
+---
+title: Errors and debugging
+description: Every error code, what it actually means, and what to send us when you are stuck.
+---
+
+## The envelope
+
+Every failure has the same shape:
+
+```json
+{
+  "error": {
+    "code": "insufficient_scope",
+    "message": "This API key lacks the datasets:write scope.",
+    "details": [],
+    "request_id": "31592257-1558-48ed-8328-a5086ccfa4ed"
+  }
+}
+```
+
+Branch on `code`. It is stable for a given condition. `message` is prose for a
+human reading logs and may be reworded.
+
+## Codes
+
+| Status | `code` | Means | First thing to check |
+|---|---|---|---|
+| 400 | `invalid_request` | Malformed body or parameters | `details` — it names the field |
+| 401 | `unauthorized` | Missing, malformed, expired or revoked key | Is `x-api-key` set? Is the key live? |
+| 403 | `insufficient_scope` | Authenticated, but the key lacks the scope | The message names the scope |
+| 403 | `forbidden` | Scoped, but still not allowed | Rare. Usually an ownership rule |
+| 404 | `not_found` | No such resource — **or it is not yours** | The id, and the key's workspace |
+| 409 | `conflict` | A state conflict | The message says which state |
+| 413 | `payload_too_large` | Body exceeded the limit | Batch size |
+| 429 | `rate_limited` | Too many attempts | `Retry-After` |
+| 500 | `internal_error` | Our fault | Send us the `request_id` |
+
+## The three that confuse people
+
+<Accordions>
+  <Accordion title="404 when the id is definitely right">
+    `404` deliberately conflates "does not exist" with "exists, but belongs to
+    another organization". Distinguishing them would confirm that an id is real,
+    which is the one thing worth withholding from someone guessing ids.
+
+    So: check which workspace the key belongs to. A key issued in one workspace
+    sees nothing in another, and the symptom is a 404 on an id you can see in
+    the console.
+  </Accordion>
+
+  <Accordion title="409 conflict on a command dispatch">
+    Four different conditions, and the message distinguishes them:
+
+    | Message mentions | Means |
+    |---|---|
+    | *disabled on this deployment* | The kill switch is off |
+    | *not armed* | [Arm the dataset](/commands/arming) |
+    | *no enabled webhook endpoint* | [Register one](/api/webhooks) |
+    | *already dispatched* | It is past `logged` — check its status |
+  </Accordion>
+
+  <Accordion title="Everything works, but nothing is stored">
+    Almost always the channel id. `POST /api/datasets/append` and the gRPC path
+    address channels by their `ch_N` column — or by index, as a string, over
+    gRPC — **not** by the channel's UUID.
+
+    Sending the UUID over gRPC produces a stream that connects, authenticates,
+    reports points accepted, and writes nothing. Call
+    `GET /api/datasets/channels` and use `hypertableColName`.
+  </Accordion>
+</Accordions>
+
+## Validation details
+
+On a `400`, `details` carries per-field messages:
+
+```json
+"details": [
+  { "field": "channels.0.name", "message": "String must contain at least 1 character(s)" },
+  { "field": "rows.12.values",  "message": "Expected 3 values, received 2" }
+]
+```
+
+The path is into the body you sent, so `rows.12.values` is the thirteenth row.
+
+## Request ids
+
+Send `X-Request-Id` and it is echoed back and used in our logs. Send nothing and
+one is generated. Either way it appears on every response — success as well as
+failure — and inside every error body.
+
+```bash
+curl -si https://app.xpectraflow.com/api/experiments/list \
+  -H "x-api-key: $XPECTRA_API_KEY" \
+  -H "X-Request-Id: nightly-sync-42"
+```
+
+Using your own ids — a job name, a run number — makes your logs and ours line up
+without correlating timestamps.
+
+## Debugging a webhook that never arrives
+
+Covered step by step on
+[Lifecycle and retries](/commands/lifecycle#diagnosing-a-command-that-never-arrived).
+The short version: check the command's `status` first, then
+`GET /api/webhooks/deliveries?commandId=…`, and remember that **a 4xx from your
+receiver is final**.
+
+## Debugging a signature that will not verify
+
+In order of likelihood:
+
+<Steps>
+<Step>
+**You are signing a re-serialised body.** The signature covers the raw request
+bytes. If your framework parsed the JSON and you re-encoded it, key order and
+number formatting differ. Use the raw body.
+</Step>
+<Step>
+**You stripped `whsec_` before keying.** The key is the whole secret string,
+prefix included.
+</Step>
+<Step>
+**You are only checking the first `v1=` value.** During a
+[rotation](/api/webhooks#rotate-the-secret) two are sent, and either may be the
+one you know.
+</Step>
+<Step>
+**Your clock is off.** The timestamp is inside the signed string and must be
+within ±300 seconds.
+</Step>
+</Steps>
+
+## What to send us
+
+- The `request_id`
+- The `code` and the full error body
+- The endpoint and roughly when
+- The key's `keyPrefix` — never the key itself
+
+With a `request_id` we can find the exact request. Without one, we are
+correlating timestamps.
