@@ -1,0 +1,279 @@
+---
+title: System specs
+description: What one on-prem server absorbs — 10 kHz across 100 channels, how much of it you keep, and the arithmetic behind both numbers.
+---
+
+The reference workload on this page is **10 kHz across 100 channels** — one
+million values a second, into a single dataset, on one on-prem server.
+
+The short answer:
+
+<Callout type="info">
+**One server at the recommended spec ingests 10 kHz across 100 channels
+continuously, and stores about 310 hours of it.**
+
+That is twelve hours of recording a week for six months, or eighteen hours a
+week for four — without adding hardware, changing the schema, or migrating
+anything.
+</Callout>
+
+The rest of this page is the arithmetic, so you can check it against your own
+duty cycle rather than take the claim on faith.
+
+## The server
+
+One machine. Sized for on-prem, where you buy the box once and want it to still
+be the right box in two years.
+
+| | Minimum | Recommended |
+|---|---|---|
+| CPU | 8 cores | 16 cores |
+| RAM | 16 GB | 32 GB |
+| System disk | 100 GB SSD | 250 GB SSD |
+| Data disk | 1 TB NVMe SSD, dedicated | 2 TB NVMe SSD, dedicated |
+| Data disk write throughput | ≥ 250 MB/s sustained | ≥ 500 MB/s sustained |
+| Network | 1 GbE | 1 GbE |
+| OS | 64-bit Linux | 64-bit Linux |
+
+Two things about that table are worth saying out loud:
+
+- **The data disk is separate, and it is the component that matters.** Telemetry
+  is written continuously and read in bulk; keep it on its own NVMe device
+  rather than sharing the system disk. Its size is what decides how much history
+  you keep, and nothing else on this page changes that.
+- **Everything else runs on that one machine.** The software layers are
+  installed and tuned during deployment; you do not size them separately, and
+  they are not your problem to operate.
+
+Against that hardware, the reference workload is a small fraction of the box:
+
+| | At 10 kHz × 100 channels | Recommended spec | Used |
+|---|---|---|---|
+| Network | 64 Mbit/s | 1 Gbit/s | ≈ 6% |
+| Disk write | ≈ 20 MB/s | 500 MB/s | ≈ 4% |
+| Cores | Ingest is a single writer per dataset | 16 | Leaves the rest for queries |
+
+The headroom is deliberate. A server that runs at 90% of its disk throughput on
+the day it is installed is a server that fails the first time somebody adds a
+second test stand.
+
+## What it absorbs
+
+<Callout type="info">
+Figures are for 10 kHz × 100 channels, one dataset. Every line is linear in
+rate × channels — divide or multiply freely.
+</Callout>
+
+| | Per second |
+|---|---|
+| Values | 1,000,000 |
+| Rows | 10,000 |
+| Over the wire, streaming | ≈ 8.0 MB/s (64 Mbit/s) |
+| Over the wire, JSON batches | ≈ 13 MB/s |
+| Written to disk, before compression | ≈ 9 MB/s |
+
+Each row costs about **900 bytes** on disk — 800 for the hundred float64
+readings, the rest for the timestamp, the dataset reference and the index entry
+that makes it findable. At 10,000 rows a second that is **≈ 32 GB per hour of
+recording**, before compression.
+
+That number, not throughput, is what decides how long you go without touching
+anything.
+
+## How much it holds
+
+Storage is a function of **hours actually recorded**, not calendar time:
+
+| Per recorded hour | Size |
+|---|---|
+| Rows | 36,000,000 |
+| Raw | ≈ 32 GB |
+| Stored, conservative (5× compression) | ≈ 6.4 GB |
+| Stored, typical for smooth analog telemetry (10×) | ≈ 3.2 GB |
+
+Telemetry is compressed automatically once an hour of data has closed, so the
+steady-state figure is the compressed one. At the conservative 5×:
+
+| Data disk | Recorded hours held | Unbroken single session |
+|---|---|---|
+| 1 TB | ≈ 156 hours | ≈ 31 hours |
+| 2 TB | ≈ 310 hours | ≈ 62 hours |
+
+The second column is the peak case: compression only helps after data has
+settled, so one continuous session writes at the raw 32 GB/hour until it does.
+Even so, a 2 TB disk swallows a **62-hour unbroken run** of 10 kHz × 100
+channels. No realistic test campaign gets near it.
+
+Read the first column against your duty cycle:
+
+| Recorded per week | Held on 1 TB | Held on 2 TB |
+|---|---|---|
+| 2 hours | 18 months | 3 years |
+| 6 hours | 6 months | 12 months |
+| 12 hours | 3 months | **6 months** |
+| 20 hours | 8 weeks | 15 weeks |
+
+**Twelve hours of 10 kHz × 100-channel recording every week, for six months, on
+the recommended 2 TB disk, with nothing touched.** At 10× compression — common
+for smooth analog telemetry — double every figure in the table.
+
+When you do eventually reach the end of the disk, none of the answers is a
+migration:
+
+<Steps>
+<Step>
+**Archive.** Completed datasets move to
+[long-term storage](/guides/managing-datasets#archiving) on a schedule, and stay
+restorable. This keeps the working disk approximately flat however long the
+campaign runs. Already built — it is a setting, not a project.
+</Step>
+<Step>
+**Grow the disk.** Adding capacity does not move or rewrite existing data.
+</Step>
+<Step>
+**Set a retention window.** Older data is dropped automatically past a cutoff.
+Off by default, because archiving is meant to own cold storage — turn it on only
+once archiving is confirmed working.
+</Step>
+</Steps>
+
+## 100 channels is not a special case
+
+Nothing widens when you go from 8 channels to 100. Each dataset gets its own
+storage table at [registration](/ingestion/register-a-stream), with one column
+per declared channel:
+
+```
+time         timestamp
+dataset_id   uuid
+ch_0         float64
+…
+ch_99        float64
+```
+
+| | Value | Headroom at 100 channels |
+|---|---|---|
+| Columns in the table | 102 | The platform's ceiling is **1600**. You are at 6% |
+| Channels per registration | 4096 | Above what the column ceiling permits, so it is not the binding constraint |
+| Adding channels later | Additive | No table rewrite, no downtime, no re-upload |
+
+So "does 100 channels need a migration" has a flat answer: **no**, because the
+storage shape is created per dataset from the channel list you send. There is no
+shared telemetry table whose schema anyone has to change.
+
+## Measured against projected
+
+Be clear about which parts are proven:
+
+| | Validated (2026-07-16) | Reference workload |
+|---|---|---|
+| Rows/s | 20,000 | 10,000 |
+| Channels | 8 | 100 |
+| Wire | 1.3 MB/s | 8.0 MB/s |
+| Result | Zero loss, zero duplicates, publish p99 23 ms | Projected from the same pipeline |
+
+The pipeline has been run at **twice** the reference row rate with no loss and no
+duplicates. Rows per second is what the writer's per-batch overhead scales
+with — the batching, the flush timer, the duplicate check — and 10 kHz sits
+comfortably inside proven territory.
+
+The untested axis is **width**: 12.5× the bytes per row through the same bulk
+write path. Bytes per second is the axis to watch, and at ≈ 20 MB/s it is using
+about 4% of the recommended disk. There is room, but it is a projection, not a
+measurement.
+
+<Callout type="warn">
+The validated runs were on a developer workstation. Re-run the load test at
+10 kHz × 100 channels on the actual delivered hardware before go-live.
+Correctness is proven; your box's ceiling is not.
+</Callout>
+
+## Burst tolerance
+
+Producers do not write to the disk directly. A durable buffer sits in between,
+so a slow disk, a restart or a maintenance window costs latency rather than
+data:
+
+| | At the reference rate |
+|---|---|
+| Buffered backlog before anything is refused | ≈ 8 minutes of full-rate data |
+| Unacknowledged backlog before back-pressure | ≈ 3 minutes |
+| Write batching | Committed every 200 ms, or every 50,000 rows |
+
+Frames are acknowledged only **after** the data is committed, so an interrupted
+consumer replays rather than loses. Replayed rows collapse onto the rows they
+already wrote — a duplicate is never a duplicate row.
+
+<Callout type="warn">
+**Keep frames at or below 1000 rows at 100 channels.** A frame carries
+`channels × rows × 8` bytes — 500 rows is 400 KB, 1000 rows is 800 KB — and a
+single frame is capped at 1 MB. The default of 500 rows/frame leaves plenty of
+margin; 2000 rows at 100 channels is refused, visibly, but only once you are at
+rate.
+</Callout>
+
+## Where the JSON path caps out
+
+The reference workload assumes [streaming](/ingestion/grpc-streaming).
+Sustaining 10 kHz over [HTTP append](/ingestion/http-append) is a different
+proposition, and the honest arithmetic is:
+
+| | At 100 channels |
+|---|---|
+| Rows per request (hard cap) | 5000 |
+| Requests/s needed for 10 kHz | 2 |
+| JSON per request | ≈ 6.5 MB |
+| Internal write statements per request | **9** |
+
+That last row is the one that bites. A request that wide is split into nine
+internal statements of 588 rows each, every value is written individually rather
+than as a bulk stream, and every row carries its own timestamp instead of
+sharing one base timestamp and a sample period across a whole frame.
+
+**HTTP append remains right for backfills, slow sensors and anything a person
+triggers, up to a few hundred rows a second.** Above that, streaming is not an
+optimisation, it is the supported path — and switching does not change the data
+model: same dataset, same `ch_N` columns, same channel list.
+
+## What would actually force a change
+
+Three triggers, in the order you are likely to meet them:
+
+<Accordions>
+  <Accordion title="Several 10 kHz streams at once">
+    Each dataset gets its own writer, so concurrent streams genuinely
+    parallelise — which is most of why the recommended spec is 16 cores rather
+    than 4. Four simultaneous 10 kHz × 100-channel streams is 256 Mbit/s… of a
+    1 Gbit link, and ≈ 80 MB/s of a 500 MB/s disk.
+
+    What runs out first is storage, at four times the rate of the tables above —
+    not compute, and not the network.
+  </Accordion>
+
+  <Accordion title="More recorded hours than the disk holds">
+    Per the table above: about 310 hours on 2 TB. In order of cost — turn on
+    archiving to long-term storage (already built), grow the disk, then set a
+    retention window. None of the three changes the schema, the API or your
+    client code.
+  </Accordion>
+
+  <Accordion title="More than about 1500 channels in one dataset">
+    The 1600-column ceiling — the only genuine schema wall on this page, and 15×
+    beyond the reference workload. At that width the
+    [narrow shape](/ingestion#the-one-decision-that-is-hard-to-undo) is the right
+    storage model anyway, and it is chosen at registration.
+  </Accordion>
+</Accordions>
+
+Query load is the wildcard none of the above covers: reads on recent data share
+the same machine as the writer. Bulk reads already downsample server-side for
+exactly this reason, but a dashboard polling a live 10 kHz dataset is spending
+from the same budget as the ingest — which is the other reason the recommended
+core count is what it is.
+
+## Checking it yourself
+
+A [support bundle](/guides/support-logs) reports every dataset's storage table
+with its estimated row count and total size on disk. Two bundles a week apart
+give you your real growth rate — the one number this page cannot predict for
+you.

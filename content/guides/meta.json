@@ -1,5 +1,10 @@
 {
   "title": "Console guides",
   "description": "The things only a person in a browser can do.",
-  "pages": ["team-and-access", "managing-datasets", "errors-and-debugging"]
+  "pages": [
+    "team-and-access",
+    "managing-datasets",
+    "errors-and-debugging",
+    "support-logs"
+  ]
 }
